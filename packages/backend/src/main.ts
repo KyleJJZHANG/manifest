@@ -83,8 +83,11 @@ export async function bootstrap() {
   expressApp.all('/api/auth/*splat', toNodeHandler(auth));
 
   // Re-add body parsing for NestJS routes
-  expressApp.use(express.json({ limit: '1mb' }));
-  expressApp.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  // The /v1/chat/completions proxy forwards conversation history which may
+  // contain base64 screenshots. 5 MB accommodates typical conversations
+  // with compressed images while still preventing abuse.
+  expressApp.use(express.json({ limit: '5mb' }));
+  expressApp.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
   const port = Number(process.env['PORT'] ?? 3001);
   const host = process.env['BIND_ADDRESS'] ?? '127.0.0.1';
