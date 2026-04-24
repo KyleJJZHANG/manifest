@@ -555,6 +555,8 @@ describe('ProxyService', () => {
       undefined,
       ['complex', 'complex'],
       undefined,
+      undefined,
+      undefined,
     );
   });
 
@@ -633,6 +635,8 @@ describe('ProxyService', () => {
       expect.any(Array),
       bodyWithTools.tools,
       bodyWithTools.tool_choice,
+      undefined,
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -1297,6 +1301,8 @@ describe('ProxyService', () => {
         4096,
         undefined,
         undefined,
+        undefined,
+        undefined,
       );
     });
   });
@@ -1759,6 +1765,52 @@ describe('ProxyService', () => {
       expect(tierService.getTiers).not.toHaveBeenCalled();
       expect(result.meta.fallbackFromModel).toBeUndefined();
       expect(result.meta.fallbackIndex).toBeUndefined();
+    });
+
+    it('tries specificity fallback models before tier fallbacks when a specific-tier route fails', async () => {
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-5.4',
+        provider: 'OpenAI',
+        confidence: 0.95,
+        score: 0,
+        reason: 'specificity',
+        specificity_category: 'coding',
+        fallback_models: ['claude-sonnet-4'],
+      });
+      providerKeyService.getProviderApiKey
+        .mockResolvedValueOnce('sk-openai')
+        .mockResolvedValueOnce('sk-ant');
+      providerClient.forward
+        .mockResolvedValueOnce({
+          response: new Response('error', { status: 429 }),
+          isGoogle: false,
+          isAnthropic: false,
+          isChatGpt: false,
+        })
+        .mockResolvedValueOnce({
+          response: new Response('{}', { status: 200 }),
+          isGoogle: false,
+          isAnthropic: true,
+          isChatGpt: false,
+        });
+      tierService.getTiers.mockResolvedValue([
+        { tier: 'standard', fallback_models: null },
+      ] as never);
+      pricingCache.getByModel.mockReturnValue({ provider: 'Anthropic' } as never);
+
+      const result = await service.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'default',
+      });
+
+      expect(result.meta.fallbackFromModel).toBe('gpt-5.4');
+      expect(result.meta.fallbackIndex).toBe(0);
+      expect(result.meta.primaryErrorStatus).toBe(429);
+      expect(result.meta.model).toBe('claude-sonnet-4');
+      expect(result.meta.specificity_category).toBe('coding');
     });
 
     it('tries fallback model when primary returns 429', async () => {
@@ -3086,6 +3138,178 @@ describe('ProxyService', () => {
           authType: 'subscription',
         }),
       );
+    });
+
+    it('passes thinkingLookup that delegates to ThinkingBlockCache.retrieve', async () => {
+      const cache = new ThinkingBlockCache();
+      cache.store('sess-think', 'tu-42', [
+        { type: 'thinking', thinking: 'cached', signature: 'sig' },
+      ]);
+
+      const svcWithCache = new ProxyService(
+        resolveService,
+        providerKeyService,
+        tierService,
+        openaiOauth,
+        minimaxOauth,
+        momentum,
+        limitCheck,
+        fallbackService,
+        configService,
+        new ThoughtSignatureCache(),
+        cache,
+      );
+
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.8,
+        score: 0.1,
+        reason: 'scored',
+      });
+      providerKeyService.getProviderApiKey.mockResolvedValue('sk-test');
+      providerClient.forward.mockResolvedValue({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      await svcWithCache.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'sess-think',
+      });
+
+      const callArgs = providerClient.forward.mock.calls[0][0] as unknown as Record<
+        string,
+        unknown
+      >;
+      const lookup = callArgs.thinkingLookup as (id: string) => unknown;
+      expect(lookup('tu-42')).toEqual([{ type: 'thinking', thinking: 'cached', signature: 'sig' }]);
+      expect(lookup('nonexistent')).toBeNull();
+    });
+
+    it('records the specificity category on a successful resolve for session stickiness', async () => {
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.9,
+        score: 0.2,
+        reason: 'specificity',
+        specificity_category: 'coding',
+      });
+      providerKeyService.getProviderApiKey.mockResolvedValue('sk-test');
+      providerClient.forward.mockResolvedValue({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      await service.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'sess-sticky',
+      });
+
+      expect(momentum.getRecentCategories('sess-sticky')).toEqual(['coding']);
+    });
+
+    it('skips category recording when the resolve result has no specificity category', async () => {
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.5,
+        score: 0.2,
+        reason: 'scored',
+      });
+      providerKeyService.getProviderApiKey.mockResolvedValue('sk-test');
+      providerClient.forward.mockResolvedValue({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      await service.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'sess-no-cat',
+      });
+
+      expect(momentum.getRecentCategories('sess-no-cat')).toBeUndefined();
+    });
+
+    it('ignores non-canonical specificity category values surfaced by the resolver', async () => {
+      // Cast through `any` — the type guards `specificity_category` to valid
+      // categories, but the runtime guard in `recordCategoryIfValid` must still
+      // reject non-canonical values if they ever slip through (e.g. a future
+      // resolver surfacing an unknown tag).
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.5,
+        score: 0.2,
+        reason: 'specificity',
+        specificity_category: 'not_a_real_category' as unknown as 'coding',
+      });
+      providerKeyService.getProviderApiKey.mockResolvedValue('sk-test');
+      providerClient.forward.mockResolvedValue({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      await service.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'sess-bad-cat',
+      });
+
+      expect(momentum.getRecentCategories('sess-bad-cat')).toBeUndefined();
+    });
+
+    it('forwards recentCategories from momentum into ResolveService.resolve', async () => {
+      momentum.recordCategory('sess-history', 'coding');
+      momentum.recordCategory('sess-history', 'coding');
+      momentum.recordCategory('sess-history', 'coding');
+
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.5,
+        score: 0.2,
+        reason: 'scored',
+      });
+      providerKeyService.getProviderApiKey.mockResolvedValue('sk-test');
+      providerClient.forward.mockResolvedValue({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      await service.proxyRequest({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body,
+        sessionKey: 'sess-history',
+      });
+
+      const call = resolveService.resolve.mock.calls[0];
+      // resolve(agentId, messages, tools, toolChoice, maxTokens, recentTiers, specOverride, recentCategories)
+      expect(call[7]).toEqual(['coding', 'coding', 'coding']);
     });
 
     it('passes signatureLookup that delegates to ThoughtSignatureCache.retrieve', async () => {

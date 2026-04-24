@@ -139,9 +139,7 @@ describe('ThinkingBlockCache', () => {
       Date.now = () => baseTime;
       const localCache = new ThinkingBlockCache();
 
-      const blocks1: ThinkingBlock[] = [
-        { type: 'thinking', thinking: 'first', signature: 'sig1' },
-      ];
+      const blocks1: ThinkingBlock[] = [{ type: 'thinking', thinking: 'first', signature: 'sig1' }];
       localCache.store('s1', 'toolu_1', blocks1);
 
       // Advance only 2 minutes (less than 5 min cleanup interval)

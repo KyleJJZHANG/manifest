@@ -465,7 +465,11 @@ describe('Anthropic Adapter', () => {
         injectCacheControl: false,
         injectSubscriptionIdentity: true,
       });
-      const system = result.system as Array<{ type: string; text: string; cache_control?: unknown }>;
+      const system = result.system as Array<{
+        type: string;
+        text: string;
+        cache_control?: unknown;
+      }>;
       expect(system).toHaveLength(2);
       expect(system[0].text).toContain('Claude agent');
       expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
@@ -1184,10 +1188,7 @@ describe('Anthropic Adapter', () => {
       it('extracts redacted_thinking blocks the same way', () => {
         const redacted = { type: 'redacted_thinking', data: 'opaque-blob' };
         const resp = {
-          content: [
-            redacted,
-            { type: 'tool_use', id: 'toolu_1', name: 'search', input: {} },
-          ],
+          content: [redacted, { type: 'tool_use', id: 'toolu_1', name: 'search', input: {} }],
           stop_reason: 'tool_use',
         };
         const result = fromAnthropicResponse(resp, 'claude-sonnet-4-20250514');
@@ -1209,9 +1210,7 @@ describe('Anthropic Adapter', () => {
           stop_reason: 'end_turn',
         };
         const result = fromAnthropicResponse(resp, 'claude-sonnet-4-20250514');
-        expect(
-          (result as Record<string, unknown>)._extractedThinkingBlocks,
-        ).toBeUndefined();
+        expect((result as Record<string, unknown>)._extractedThinkingBlocks).toBeUndefined();
       });
 
       it('does not surface _extractedThinkingBlocks when there are tool_use but no thinking', () => {
@@ -1223,9 +1222,7 @@ describe('Anthropic Adapter', () => {
           stop_reason: 'tool_use',
         };
         const result = fromAnthropicResponse(resp, 'claude-sonnet-4-20250514');
-        expect(
-          (result as Record<string, unknown>)._extractedThinkingBlocks,
-        ).toBeUndefined();
+        expect((result as Record<string, unknown>)._extractedThinkingBlocks).toBeUndefined();
       });
 
       it('maps regular content and tool_calls alongside thinking extraction', () => {
@@ -1269,12 +1266,7 @@ describe('Anthropic Adapter', () => {
         const b2 = { type: 'redacted_thinking', data: 'blob' };
         const b3 = { type: 'thinking', thinking: 'step 3', signature: 's3' };
         const resp = {
-          content: [
-            b1,
-            b2,
-            b3,
-            { type: 'tool_use', id: 'toolu_1', name: 'calc', input: {} },
-          ],
+          content: [b1, b2, b3, { type: 'tool_use', id: 'toolu_1', name: 'calc', input: {} }],
           stop_reason: 'tool_use',
         };
         const result = fromAnthropicResponse(resp, 'claude-sonnet-4-20250514');
@@ -1389,9 +1381,9 @@ describe('Anthropic Adapter', () => {
       });
 
       it('does not call thinkingLookup when assistant message has no tool_calls', () => {
-        const lookup = jest.fn().mockReturnValue([
-          { type: 'thinking', thinking: 'ignored', signature: 'x' },
-        ]);
+        const lookup = jest
+          .fn()
+          .mockReturnValue([{ type: 'thinking', thinking: 'ignored', signature: 'x' }]);
         const body = {
           messages: [
             { role: 'user', content: 'Hi' },
@@ -1442,7 +1434,11 @@ describe('Anthropic Adapter', () => {
                 {
                   type: 'function',
                   function: { name: 'noop', arguments: '{}' },
-                } as unknown as { id: string; type: string; function: { name: string; arguments: string } },
+                } as unknown as {
+                  id: string;
+                  type: string;
+                  function: { name: string; arguments: string };
+                },
               ],
             },
           ],

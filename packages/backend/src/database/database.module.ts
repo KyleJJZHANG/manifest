@@ -5,8 +5,6 @@ import { ConfigService } from '@nestjs/config';
 import { AgentMessage } from '../entities/agent-message.entity';
 import { LlmCall } from '../entities/llm-call.entity';
 import { ToolExecution } from '../entities/tool-execution.entity';
-import { TokenUsageSnapshot } from '../entities/token-usage-snapshot.entity';
-import { CostSnapshot } from '../entities/cost-snapshot.entity';
 import { AgentLog } from '../entities/agent-log.entity';
 import { ApiKey } from '../entities/api-key.entity';
 import { Tenant } from '../entities/tenant.entity';
@@ -19,6 +17,8 @@ import { UserProvider } from '../entities/user-provider.entity';
 import { TierAssignment } from '../entities/tier-assignment.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
 import { SpecificityAssignment } from '../entities/specificity-assignment.entity';
+import { HeaderTier } from '../entities/header-tier.entity';
+import { InstallMetadata } from '../entities/install-metadata.entity';
 import { DatabaseSeederService } from './database-seeder.service';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
 import { InitialSchema1771464895790 } from './migrations/1771464895790-InitialSchema';
@@ -68,13 +68,19 @@ import { AddSpecificityAssignments1775200000000 } from './migrations/17752000000
 import { AddSpecificityCategory1775300000000 } from './migrations/1775300000000-AddSpecificityCategory';
 import { AddCallerAttribution1775400000000 } from './migrations/1775400000000-AddCallerAttribution';
 import { AddMessageProvider1775500000000 } from './migrations/1775500000000-AddMessageProvider';
+import { AddMessageFeedback1775600000000 } from './migrations/1775600000000-AddMessageFeedback';
+import { AddInstallMetadata1775700000000 } from './migrations/1775700000000-AddInstallMetadata';
+import { CleanupOrphanedCustomProviderRefs1776679833383 } from './migrations/1776679833383-CleanupOrphanedCustomProviderRefs';
+import { AddMessageRequestHeaders1776700000000 } from './migrations/1776700000000-AddMessageRequestHeaders';
+import { AddHeaderTiers1776710000000 } from './migrations/1776710000000-AddHeaderTiers';
+import { AddSpecificityMiscategorized1777000000000 } from './migrations/1777000000000-AddSpecificityMiscategorized';
+import { AddComplexityRoutingFlag1777100000000 } from './migrations/1777100000000-AddComplexityRoutingFlag';
+import { AddHeaderTierEnabled1777100000000 } from './migrations/1777100000000-AddHeaderTierEnabled';
 
 const entities = [
   AgentMessage,
   LlmCall,
   ToolExecution,
-  TokenUsageSnapshot,
-  CostSnapshot,
   AgentLog,
   ApiKey,
   Tenant,
@@ -87,6 +93,8 @@ const entities = [
   TierAssignment,
   CustomProvider,
   SpecificityAssignment,
+  HeaderTier,
+  InstallMetadata,
 ];
 
 const migrations = [
@@ -137,6 +145,14 @@ const migrations = [
   AddSpecificityCategory1775300000000,
   AddCallerAttribution1775400000000,
   AddMessageProvider1775500000000,
+  AddMessageFeedback1775600000000,
+  AddInstallMetadata1775700000000,
+  CleanupOrphanedCustomProviderRefs1776679833383,
+  AddMessageRequestHeaders1776700000000,
+  AddHeaderTiers1776710000000,
+  AddSpecificityMiscategorized1777000000000,
+  AddComplexityRoutingFlag1777100000000,
+  AddHeaderTierEnabled1777100000000,
 ];
 
 @Module({
@@ -149,9 +165,13 @@ const migrations = [
         url: config.get<string>('app.databaseUrl'),
         entities,
         synchronize: false,
-        migrationsRun:
-          process.env['AUTO_MIGRATE'] === 'true' ||
-          ['development', 'test'].includes(config.get<string>('app.nodeEnv') ?? ''),
+        // Run migrations on every boot. `synchronize: false` is permanent, so
+        // committed migrations are the only source of schema changes — there's
+        // no scenario where production should boot with pending migrations
+        // unapplied (the dashboard 500s on missing tables). Previously this
+        // was gated on AUTO_MIGRATE=true / NODE_ENV, which broke fresh
+        // production installs whose env didn't set the var (see #1551 / 5.45.1).
+        migrationsRun: true,
         migrationsTransactionMode: 'all' as const,
         migrations,
         logging: false,
@@ -171,6 +191,7 @@ const migrations = [
       TierAssignment,
       CustomProvider,
       SpecificityAssignment,
+      HeaderTier,
     ]),
     ModelPricesModule,
   ],

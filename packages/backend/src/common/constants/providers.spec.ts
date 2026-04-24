@@ -9,8 +9,8 @@ import {
 } from './providers';
 
 describe('PROVIDER_REGISTRY', () => {
-  it('should contain exactly 14 provider entries', () => {
-    expect(PROVIDER_REGISTRY).toHaveLength(14);
+  it('should contain exactly 16 provider entries', () => {
+    expect(PROVIDER_REGISTRY).toHaveLength(16);
   });
 
   it('ollama-cloud has localOnly=false and requiresApiKey=false', () => {
@@ -79,14 +79,24 @@ describe('PROVIDER_REGISTRY', () => {
     expect(copilot!.aliases).toEqual([]);
     expect(copilot!.openRouterPrefixes).toEqual([]);
   });
+
+  it('opencode-go is registered with opencodego alias and no OpenRouter prefix', () => {
+    const og = PROVIDER_REGISTRY.find((p) => p.id === 'opencode-go');
+    expect(og).toBeDefined();
+    expect(og!.displayName).toBe('OpenCode Go');
+    expect(og!.aliases).toEqual(['opencodego']);
+    expect(og!.openRouterPrefixes).toEqual([]);
+    expect(og!.requiresApiKey).toBe(true);
+    expect(og!.localOnly).toBe(false);
+  });
 });
 
 describe('PROVIDER_BY_ID', () => {
-  it('resolves all 14 provider IDs', () => {
+  it('resolves all 16 provider IDs', () => {
     for (const entry of PROVIDER_REGISTRY) {
       expect(PROVIDER_BY_ID.get(entry.id)).toBe(entry);
     }
-    expect(PROVIDER_BY_ID.size).toBe(14);
+    expect(PROVIDER_BY_ID.size).toBe(16);
   });
 
   it('returns undefined for an unknown ID', () => {

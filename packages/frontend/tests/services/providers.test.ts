@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { PROVIDERS, STAGES, getModelLabel, getProvider } from "../../src/services/providers";
+import { PROVIDERS, STAGES, getModelLabel, getProvider, buildProviderDef } from "../../src/services/providers";
 import { validateApiKey, validateSubscriptionKey } from "../../src/services/provider-utils";
 import { ROUTING_PROVIDER_API_KEY_URLS, EMAIL_PROVIDER_API_KEY_URLS, SUBSCRIPTION_PROVIDER_KEY_URLS, getRoutingProviderApiKeyUrl, getEmailProviderApiKeyUrl, getSubscriptionProviderKeyUrl } from "../../src/services/provider-api-key-urls";
 
@@ -243,8 +243,8 @@ describe("getModelLabel", () => {
 /* ── PROVIDERS constant ────────────────────────── */
 
 describe("PROVIDERS", () => {
-  it("has 14 providers defined", () => {
-    expect(PROVIDERS).toHaveLength(14);
+  it("has 16 providers defined", () => {
+    expect(PROVIDERS).toHaveLength(16);
   });
 
   it("providers are sorted alphabetically by name", () => {
@@ -333,6 +333,7 @@ describe("PROVIDERS", () => {
       (p) =>
         p.subscriptionOnly &&
         p.subscriptionAuthMode === "token" &&
+        !p.subscriptionSignInUrl &&
         !SUBSCRIPTION_PROVIDER_KEY_URLS[p.id],
     ).map((p) => p.id);
     expect(missing).toEqual([]);
@@ -353,11 +354,47 @@ describe("PROVIDERS", () => {
     );
   });
 
+  it("OpenCode Go is subscription-only with a sign-in URL", () => {
+    const og = PROVIDERS.find((p) => p.id === "opencode-go")!;
+    expect(og).toBeDefined();
+    expect(og.supportsSubscription).toBe(true);
+    expect(og.subscriptionOnly).toBe(true);
+    expect(og.subscriptionAuthMode).toBe("token");
+    expect(og.subscriptionLabel).toBe("OpenCode Go (beta)");
+    expect(og.subscriptionKeyPlaceholder).toBe("Paste your OpenCode API key");
+    expect(og.subscriptionSignInUrl).toBe("https://opencode.ai/auth");
+    expect(og.subscriptionSignInLabel).toBe("Sign in to OpenCode Go");
+    expect(og.subscriptionSignInHint).toMatch(/Sign in to OpenCode Go/);
+    expect(og.subscriptionSignInHint).not.toMatch(/Zen/i);
+    expect(og.beta).toBe(true);
+  });
+
+  it("OpenCode Go has no hardcoded model list (catalog is dynamic)", () => {
+    const og = PROVIDERS.find((p) => p.id === "opencode-go")!;
+    expect(og.models).toEqual([]);
+  });
+
+  it("OpenCode Go subscription key is validated with generic min-length check", () => {
+    const og = PROVIDERS.find((p) => p.id === "opencode-go")!;
+    expect(validateSubscriptionKey(og, "")).toEqual({
+      valid: false,
+      error: "Token is required",
+    });
+    expect(validateSubscriptionKey(og, "short")).toEqual({
+      valid: false,
+      error: "Token is too short (minimum 10 characters)",
+    });
+    expect(validateSubscriptionKey(og, "a-valid-opencode-token-1234")).toEqual({
+      valid: true,
+    });
+  });
+
   it("requires an API key URL for every provider that needs one", () => {
     const missingProviderIds = PROVIDERS.filter(
       (provider) =>
         !provider.noKeyRequired &&
         !provider.deviceLogin &&
+        !provider.subscriptionOnly &&
         !ROUTING_PROVIDER_API_KEY_URLS[provider.id],
     ).map((provider) => provider.id);
     expect(missingProviderIds).toEqual([]);
@@ -436,5 +473,23 @@ describe("getEmailProviderApiKeyUrl", () => {
 
   it("returns undefined for an unknown provider", () => {
     expect(getEmailProviderApiKeyUrl("unknown")).toBeUndefined();
+  });
+});
+
+/* ── buildProviderDef error path ──────────────── */
+
+describe("buildProviderDef", () => {
+  it("throws when shared provider has no UI overlay", () => {
+    const fakeShared = {
+      id: "nonexistent-provider",
+      displayName: "Fake",
+      color: "#000",
+      keyPrefix: "",
+      minKeyLength: 0,
+      keyPlaceholder: "",
+    } as any;
+    expect(() => buildProviderDef(fakeShared)).toThrow(
+      'Missing UI overlay for shared provider "nonexistent-provider"',
+    );
   });
 });

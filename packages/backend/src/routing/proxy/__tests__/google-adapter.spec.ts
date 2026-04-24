@@ -1170,10 +1170,7 @@ describe('Google Adapter', () => {
         candidates: [
           {
             content: {
-              parts: [
-                { text: 'thinking', thought: true },
-                { text: 'answer' },
-              ],
+              parts: [{ text: 'thinking', thought: true }, { text: 'answer' }],
             },
           },
         ],

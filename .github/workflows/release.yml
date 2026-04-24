@@ -43,11 +43,20 @@ jobs:
         id: detect
         env:
           BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
-          # Read CURR from HEAD (not the working tree) because
-          # changesets/action runs `npm run version-packages` in place and
-          # may have mutated packages/manifest/package.json on disk.
-          CURR=$(git show HEAD:packages/manifest/package.json 2>/dev/null | jq -r .version 2>/dev/null || echo "")
+          # Read both versions from the immutable remote SHAs of the push
+          # event, NOT from `HEAD`. changesets/action@v1 runs
+          # `npm run version-packages` in this same checkout when there are
+          # unconsumed changesets and commits the result locally to push as
+          # a "chore: version packages" side-branch PR. After that runs,
+          # local HEAD points at a commit whose version bump is NOT yet on
+          # main — using it here would falsely report a bump and trigger
+          # downstream publish jobs with main's stale version number,
+          # clobbering an existing Docker tag and a GitHub Release. See the
+          # 5.47.0 re-publish incident during PR #1557 merge for the
+          # failure mode this guards against.
+          CURR=$(git show "${AFTER_SHA}:packages/manifest/package.json" 2>/dev/null | jq -r .version 2>/dev/null || echo "")
           # Compare against the push base so multi-commit pushes are handled
           # correctly. On first push to a branch, BEFORE_SHA is all zeros.
           if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
@@ -62,6 +71,40 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
             echo "No version change (PREV=${PREV:-<none>} CURR=${CURR:-<none>})"
           fi
+
+  github-release:
+    needs: release
+    if: needs.release.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(jq -r .version packages/manifest/package.json)
+          TAG="manifest@${VERSION}"
+
+          # Extract changelog section for this version
+          BODY=$(awk -v ver="## ${VERSION}" \
+            '$0 == ver { found=1; next } found && /^## / { exit } found { print }' \
+            packages/manifest/CHANGELOG.md)
+
+          # Add emoji headers
+          BODY=$(echo "$BODY" | sed \
+            -e 's/^### Major Changes$/### 💥 Major Changes/' \
+            -e 's/^### Minor Changes$/### ✨ Minor Changes/' \
+            -e 's/^### Patch Changes$/### 🐛 Patch Changes/')
+
+          git tag "$TAG" 2>/dev/null || true
+          git push origin "$TAG" 2>/dev/null || true
+
+          gh release create "$TAG" \
+            --title "manifest v${VERSION}" \
+            --notes "${BODY:-No changelog}" \
+            --verify-tag
 
   publish-docker:
     needs: release

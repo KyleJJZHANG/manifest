@@ -13,6 +13,26 @@ import { RoutingCacheService } from '../routing-core/routing-cache.service';
 import { TierAutoAssignService } from '../routing-core/tier-auto-assign.service';
 import { CreateCustomProviderDto, UpdateCustomProviderDto } from '../dto/custom-provider.dto';
 import { validatePublicUrl } from '../../common/utils/url-validation';
+import { isSelfHosted } from '../../common/utils/detect-self-hosted';
+import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
+import { classifyProbeError } from './probe-error';
+
+const PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * OpenAI-compatible `/v1/models` endpoints return every model the server
+ * knows about — including embedding / reranker / moderation models that
+ * can't serve `/v1/chat/completions`. LM Studio silently redirects chat
+ * calls to its loaded LLM, masking the problem; strict OpenAI-compatible
+ * servers reject the call with 400. Either way, surfacing embedders in
+ * the routing UI is misleading, so we filter them out at probe time.
+ */
+const EMBEDDING_MODEL_PATTERN =
+  /(?:^|[\/_\-])embed(?:ding|dings|ed)?(?:[\/_\-]|$)|text[_\-]embedding|embedder|reranker|moderation/i;
+
+export function isEmbeddingModel(id: string): boolean {
+  return EMBEDDING_MODEL_PATTERN.test(id);
+}
 
 @Injectable()
 export class CustomProviderService {
@@ -22,6 +42,7 @@ export class CustomProviderService {
     private readonly providerService: ProviderService,
     private readonly routingCache: RoutingCacheService,
     private readonly autoAssign: TierAutoAssignService,
+    private readonly pricingCache: ModelPricingCacheService,
   ) {}
 
   /** Provider key used in UserProvider tables. */
@@ -72,7 +93,7 @@ export class CustomProviderService {
     }
 
     try {
-      await validatePublicUrl(dto.base_url);
+      await validatePublicUrl(dto.base_url, { allowPrivate: isSelfHosted() });
     } catch (err) {
       throw new BadRequestException((err as Error).message);
     }
@@ -98,6 +119,11 @@ export class CustomProviderService {
 
     // Create UserProvider + trigger tier recalculation
     await this.providerService.upsertProvider(agentId, userId, provKey, dto.apiKey);
+
+    // Rebuild the shared pricing cache so the proxy can compute cost for
+    // requests routed to this custom provider's models immediately (without
+    // waiting for the daily 5am reload).
+    await this.pricingCache.reload();
 
     return cp;
   }
@@ -125,7 +151,7 @@ export class CustomProviderService {
 
     if (dto.base_url !== undefined) {
       try {
-        await validatePublicUrl(dto.base_url);
+        await validatePublicUrl(dto.base_url, { allowPrivate: isSelfHosted() });
       } catch (err) {
         throw new BadRequestException((err as Error).message);
       }
@@ -159,6 +185,12 @@ export class CustomProviderService {
     await this.repo.save(cp);
     this.routingCache.invalidateAgent(agentId);
 
+    // Reload pricing cache when the model list changes so new prices (or
+    // edits to existing ones) are used for subsequent cost computations.
+    if (dto.models !== undefined) {
+      await this.pricingCache.reload();
+    }
+
     return cp;
   }
 
@@ -179,9 +211,70 @@ export class CustomProviderService {
 
     // Delete CustomProvider row
     await this.repo.remove(cp);
+
+    // Drop stale pricing entries for this provider's models from the cache.
+    await this.pricingCache.reload();
   }
 
   async getById(id: string): Promise<CustomProvider | null> {
     return this.repo.findOne({ where: { id } });
+  }
+
+  /**
+   * Probes the `{base_url}/models` endpoint of an OpenAI-compatible server
+   * and returns the discovered model IDs. Used by the "Fetch models" button
+   * in the custom-provider form so users connecting a local LLM server
+   * (LM Studio, Ollama-on-host, or any OpenAI-compatible endpoint) don't
+   * have to type each model name by hand.
+   */
+  async probeModels(baseUrl: string, apiKey?: string): Promise<{ model_name: string }[]> {
+    try {
+      await validatePublicUrl(baseUrl, { allowPrivate: isSelfHosted() });
+    } catch (err) {
+      throw new BadRequestException((err as Error).message);
+    }
+
+    // Trim trailing slashes without a regex to avoid polynomial backtracking
+    // on adversarial input (CodeQL js/polynomial-redos).
+    let end = baseUrl.length;
+    while (end > 0 && baseUrl.charCodeAt(end - 1) === 47 /* '/' */) end--;
+    const url = `${baseUrl.slice(0, end)}/models`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      // User-controlled URL is intentional here — this endpoint exists to
+      // connect to operator-chosen LLM servers. validatePublicUrl() above is
+      // our SSRF mitigation: cloud metadata is always blocked, private IPs
+      // only accepted in the self-hosted version. `redirect: 'error'`
+      // ensures a hostile server can't redirect the probe to a destination
+      // that would bypass validation.
+      // codeql[js/request-forgery]
+      const res = await fetch(url, {
+        headers,
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      if (!res.ok) {
+        throw new BadRequestException(classifyProbeError({ url, status: res.status }).message);
+      }
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/json')) {
+        throw new BadRequestException(classifyProbeError({ url, contentType }).message);
+      }
+      const body = (await res.json()) as { data?: { id?: string }[] };
+      const items = body?.data ?? [];
+      const filtered = items.filter(
+        (m): m is { id: string } =>
+          typeof m.id === 'string' && m.id.length > 0 && !isEmbeddingModel(m.id),
+      );
+      return filtered.map((m) => ({ model_name: m.id }));
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException(classifyProbeError({ url, error: err as Error }).message);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }

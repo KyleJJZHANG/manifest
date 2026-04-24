@@ -360,10 +360,7 @@ export interface GoogleStreamChunkResult {
   signatures: ExtractedSignature[];
 }
 
-export function transformGoogleStreamChunk(
-  chunk: string,
-  model: string,
-): GoogleStreamChunkResult {
+export function transformGoogleStreamChunk(chunk: string, model: string): GoogleStreamChunkResult {
   const empty: GoogleStreamChunkResult = { chunk: null, signatures: [] };
   if (!chunk.trim()) return empty;
 

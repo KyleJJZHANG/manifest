@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   checkNeedsSetup,
+  checkSocialProviders,
+  checkIsSelfHosted,
+  checkIsOllamaAvailable,
+  checkLocalLlmHost,
   resetSetupStatus,
   createFirstAdmin,
 } from '../../src/services/setup-status';
@@ -79,6 +83,175 @@ describe('setup-status service', () => {
       await checkNeedsSetup();
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('checkSocialProviders', () => {
+    it('returns social providers from backend', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, socialProviders: ['google', 'github'] }),
+        }),
+      );
+      expect(await checkSocialProviders()).toEqual(['google', 'github']);
+    });
+
+    it('returns empty array when backend omits socialProviders', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false }),
+        }),
+      );
+      expect(await checkSocialProviders()).toEqual([]);
+    });
+
+    it('returns empty array on fetch failure', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+      expect(await checkSocialProviders()).toEqual([]);
+    });
+  });
+
+  describe('checkIsSelfHosted', () => {
+    it('returns true when backend reports isSelfHosted=true', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, isSelfHosted: true }),
+        }),
+      );
+      expect(await checkIsSelfHosted()).toBe(true);
+    });
+
+    it('returns false when backend reports isSelfHosted=false', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, isSelfHosted: false }),
+        }),
+      );
+      expect(await checkIsSelfHosted()).toBe(false);
+    });
+
+    it('returns false when backend omits isSelfHosted', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false }),
+        }),
+      );
+      expect(await checkIsSelfHosted()).toBe(false);
+    });
+
+    it('returns false on fetch failure', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+      expect(await checkIsSelfHosted()).toBe(false);
+    });
+
+    it('shares cache with checkNeedsSetup (single fetch)', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          needsSetup: true,
+          isSelfHosted: true,
+          socialProviders: ['google'],
+          ollamaAvailable: true,
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const [needs, selfHosted, social, ollama] = await Promise.all([
+        checkNeedsSetup(),
+        checkIsSelfHosted(),
+        checkSocialProviders(),
+        checkIsOllamaAvailable(),
+      ]);
+
+      expect(needs).toBe(true);
+      expect(selfHosted).toBe(true);
+      expect(social).toEqual(['google']);
+      expect(ollama).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('checkIsOllamaAvailable', () => {
+    it('returns true when backend reports ollamaAvailable=true', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, ollamaAvailable: true }),
+        }),
+      );
+      expect(await checkIsOllamaAvailable()).toBe(true);
+    });
+
+    it('returns false when backend reports ollamaAvailable=false', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, ollamaAvailable: false }),
+        }),
+      );
+      expect(await checkIsOllamaAvailable()).toBe(false);
+    });
+
+    it('returns false when backend omits ollamaAvailable', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false }),
+        }),
+      );
+      expect(await checkIsOllamaAvailable()).toBe(false);
+    });
+
+    it('returns false on fetch failure', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+      expect(await checkIsOllamaAvailable()).toBe(false);
+    });
+  });
+
+  describe('checkLocalLlmHost', () => {
+    it('returns the backend-reported host', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false, localLlmHost: 'host.docker.internal' }),
+        }),
+      );
+      expect(await checkLocalLlmHost()).toBe('host.docker.internal');
+    });
+
+    it("defaults to 'localhost' when the backend omits the field", async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ needsSetup: false }),
+        }),
+      );
+      expect(await checkLocalLlmHost()).toBe('localhost');
+    });
+
+    it("defaults to 'localhost' on fetch failure", async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+      expect(await checkLocalLlmHost()).toBe('localhost');
+    });
+
+    it("defaults to 'localhost' when the backend returns a non-ok response", async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+      expect(await checkLocalLlmHost()).toBe('localhost');
     });
   });
 

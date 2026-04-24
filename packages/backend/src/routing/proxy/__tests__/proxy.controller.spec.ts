@@ -81,7 +81,6 @@ describe('ProxyController', () => {
     transaction: jest.Mock;
     getRepository: jest.Mock;
     query: jest.Mock;
-    connection: { options: { type: string } };
   };
   let mockMessageRepo: {
     insert: jest.Mock;
@@ -115,7 +114,6 @@ describe('ProxyController', () => {
       ),
       getRepository: jest.fn(),
       query: jest.fn().mockResolvedValue([]),
-      connection: { options: { type: 'sqlite' } },
     };
     mockMessageRepo = {
       insert: jest.fn().mockResolvedValue({}),
@@ -629,7 +627,9 @@ describe('ProxyController', () => {
   it('should handle 500 errors from proxyService as friendly chat message', async () => {
     proxyService.proxyRequest.mockRejectedValue(new Error('Internal failure'));
 
-    const req = mockRequest({ messages: [{ role: 'user', content: 'test' }] });
+    const req = mockRequest({ messages: [{ role: 'user', content: 'test' }] }, 'user-1', {
+      accept: 'text/event-stream',
+    });
     const { res } = mockResponse();
 
     await controller.chatCompletions(req as never, res as never);
@@ -649,12 +649,31 @@ describe('ProxyController', () => {
     );
   });
 
+  it('should return HTTP 500 with structured envelope for non-chat clients', async () => {
+    proxyService.proxyRequest.mockRejectedValue(new Error('Internal failure'));
+
+    const req = mockRequest({ messages: [{ role: 'user', content: 'test' }] });
+    const { res } = mockResponse();
+
+    await controller.chatCompletions(req as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          type: 'server_error',
+          message: expect.stringContaining('internal error'),
+        }),
+      }),
+    );
+  });
+
   it('should forward HttpException as friendly chat message', async () => {
     proxyService.proxyRequest.mockRejectedValue(
       new HttpException('Bad request: messages required', 400),
     );
 
-    const req = mockRequest({});
+    const req = mockRequest({}, 'user-1', { accept: 'text/event-stream' });
     const { res } = mockResponse();
 
     await controller.chatCompletions(req as never, res as never);
@@ -670,6 +689,27 @@ describe('ProxyController', () => {
             }),
           }),
         ]),
+      }),
+    );
+  });
+
+  it('should return HTTP 400 with structured envelope when caller is non-chat', async () => {
+    proxyService.proxyRequest.mockRejectedValue(
+      new HttpException('Bad request: messages required', 400),
+    );
+
+    const req = mockRequest({});
+    const { res } = mockResponse();
+
+    await controller.chatCompletions(req as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          type: 'invalid_request_error',
+          message: 'Bad request: messages required',
+        }),
       }),
     );
   });
@@ -773,15 +813,18 @@ describe('ProxyController', () => {
 
     await controller.chatCompletions(req as never, res as never);
 
-    expect(proxyService.proxyRequest).toHaveBeenCalledWith({
-      agentId: 'agent-1',
-      userId: 'user-1',
-      body: req.body,
-      sessionKey: 'my-session',
-      tenantId: 'tenant-1',
-      agentName: 'test-agent',
-      signal: expect.any(AbortSignal),
-    });
+    expect(proxyService.proxyRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body: req.body,
+        sessionKey: 'my-session',
+        tenantId: 'tenant-1',
+        agentName: 'test-agent',
+        signal: expect.any(AbortSignal),
+        headers: expect.any(Object),
+      }),
+    );
   });
 
   it('should default session key to "default" when header is absent', async () => {
@@ -806,15 +849,18 @@ describe('ProxyController', () => {
 
     await controller.chatCompletions(req as never, res as never);
 
-    expect(proxyService.proxyRequest).toHaveBeenCalledWith({
-      agentId: 'agent-1',
-      userId: 'user-1',
-      body: req.body,
-      sessionKey: 'default',
-      tenantId: 'tenant-1',
-      agentName: 'test-agent',
-      signal: expect.any(AbortSignal),
-    });
+    expect(proxyService.proxyRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'agent-1',
+        userId: 'user-1',
+        body: req.body,
+        sessionKey: 'default',
+        tenantId: 'tenant-1',
+        agentName: 'test-agent',
+        signal: expect.any(AbortSignal),
+        headers: expect.any(Object),
+      }),
+    );
   });
 
   describe('rate limiting', () => {
@@ -1383,7 +1429,9 @@ describe('ProxyController', () => {
     it('should mask error message for 500+ status codes as friendly chat message', async () => {
       proxyService.proxyRequest.mockRejectedValue(new Error('Sensitive internal error details'));
 
-      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] });
+      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'user-1', {
+        accept: 'text/event-stream',
+      });
       const { res } = mockResponse();
 
       await controller.chatCompletions(req as never, res as never);
@@ -1408,7 +1456,9 @@ describe('ProxyController', () => {
         new HttpException('messages array is required', 400),
       );
 
-      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] });
+      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'user-1', {
+        accept: 'text/event-stream',
+      });
       const { res } = mockResponse();
 
       await controller.chatCompletions(req as never, res as never);
@@ -1430,7 +1480,9 @@ describe('ProxyController', () => {
     it('should handle non-Error throw as friendly chat message', async () => {
       proxyService.proxyRequest.mockRejectedValue('string error');
 
-      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] });
+      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'user-1', {
+        accept: 'text/event-stream',
+      });
       const { res } = mockResponse();
 
       await controller.chatCompletions(req as never, res as never);

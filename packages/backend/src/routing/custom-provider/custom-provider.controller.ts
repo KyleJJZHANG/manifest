@@ -4,7 +4,11 @@ import { AuthUser } from '../../auth/auth.instance';
 import { CustomProviderService } from './custom-provider.service';
 import { ProviderService } from '../routing-core/provider.service';
 import { ResolveAgentService } from '../routing-core/resolve-agent.service';
-import { CreateCustomProviderDto, UpdateCustomProviderDto } from '../dto/custom-provider.dto';
+import {
+  CreateCustomProviderDto,
+  ProbeCustomProviderDto,
+  UpdateCustomProviderDto,
+} from '../dto/custom-provider.dto';
 import { AgentNameParamDto } from '../dto/routing.dto';
 
 @Controller('api/v1/routing')
@@ -36,6 +40,19 @@ export class CustomProviderController {
         created_at: cp.created_at,
       };
     });
+  }
+
+  @Post(':agentName/custom-providers/probe')
+  async probe(
+    @CurrentUser() user: AuthUser,
+    @Param('agentName') agentName: string,
+    @Body() body: ProbeCustomProviderDto,
+  ) {
+    // Resolve for authz — user must own the agent before the server probes
+    // anything on their behalf.
+    await this.resolveAgentService.resolve(user.id, agentName);
+    const models = await this.customProviderService.probeModels(body.base_url, body.apiKey);
+    return { models };
   }
 
   @Post(':agentName/custom-providers')

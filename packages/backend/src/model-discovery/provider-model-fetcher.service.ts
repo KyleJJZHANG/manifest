@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DiscoveredModel, FetcherConfig } from './model-fetcher';
 import { OLLAMA_CLOUD_HOST, OLLAMA_HOST } from '../common/constants/ollama';
 import { normalizeMinimaxSubscriptionBaseUrl } from '../routing/provider-base-url';
 import { getQwenCompatibleBaseUrl, normalizeQwenCompatibleBaseUrl } from '../routing/qwen-region';
+import { OpencodeGoCatalogService } from './opencode-go-catalog.service';
 
 const FETCH_TIMEOUT_MS = 5000;
 const DEFAULT_CONTEXT_WINDOW = 128000;
@@ -71,21 +72,12 @@ const parseOpenAI = createModelParser<OpenAIModelEntry>({
 /** Date-suffixed snapshots returned by OpenAI (e.g. gpt-4o-mini-2024-07-18). */
 const OPENAI_DATE_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}$/;
 
-/**
- * OpenAI models only supported in v1/responses (not v1/chat/completions).
- * Codex models (except codex-mini-latest), -pro variants of GPT-5+,
- * image generation models, o1-pro, and deep-research models.
- */
-const OPENAI_RESPONSES_ONLY_RE =
-  /(?:-codex(?!-mini-latest)|^gpt-5[^/]*-pro(?:-|$)|^gpt-image-|^o1-pro|^o4-mini-deep-research)/i;
-
 function parseOpenAIDeduped(body: unknown, provider: string): DiscoveredModel[] {
-  const filtered = parseOpenAI(body, provider).filter((m) => !OPENAI_RESPONSES_ONLY_RE.test(m.id));
-
+  const parsed = parseOpenAI(body, provider);
   // Deduplicate: if both an alias (gpt-4o-mini) and a dated snapshot
   // (gpt-4o-mini-2024-07-18) exist, keep only the alias.
-  const ids = new Set(filtered.map((m) => m.id));
-  return filtered.filter((m) => {
+  const ids = new Set(parsed.map((m) => m.id));
+  return parsed.filter((m) => {
     if (!OPENAI_DATE_SUFFIX_RE.test(m.id)) return true;
     const alias = m.id.replace(OPENAI_DATE_SUFFIX_RE, '');
     return !ids.has(alias);
@@ -108,14 +100,15 @@ export const UNIVERSAL_NON_CHAT_RE =
  */
 export const PROVIDER_NON_CHAT: Record<string, RegExp> = {
   openai:
-    /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|^gpt-3\.5-turbo-instruct|audio|^chatgpt-image|search-api)/i,
+    /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|^gpt-3\.5-turbo-instruct|audio|^chatgpt-image|^gpt-image-|search-api)/i,
   'openai-subscription':
-    /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|audio|^chatgpt-image)/i,
+    /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|audio|^chatgpt-image|^gpt-image-)/i,
   gemini:
     /(?:^aqs-|nano-banana|^deep-research|computer-use|^lyria|^gemini-2\.0-flash-lite$|flash-lite-preview|robotics)/i,
   mistral:
     /(?:^mistral-ocr|moderation|voxtral-.*-(?:transcribe|realtime)|^labs-|^mistral-vibe-cli)/i,
   xai: /(?:imagine|multi-agent)/i,
+  copilot: /accounts\/[^/]+\/routers\//i,
 };
 
 /**
@@ -435,9 +428,17 @@ export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
   },
 };
 
+const OPENCODE_GO_CONTEXT_WINDOW = 200000;
+
 @Injectable()
 export class ProviderModelFetcherService {
   private readonly logger = new Logger(ProviderModelFetcherService.name);
+
+  constructor(
+    @Optional()
+    @Inject(OpencodeGoCatalogService)
+    private readonly opencodeGoCatalog: OpencodeGoCatalogService | null = null,
+  ) {}
 
   async fetch(
     providerId: string,
@@ -453,6 +454,8 @@ export class ProviderModelFetcherService {
       configKey = 'minimax-subscription';
     } else if (configKey === 'zai' && authType === 'subscription') {
       configKey = 'zai-subscription';
+    } else if (configKey === 'opencode-go') {
+      return this.fetchOpencodeGoCatalog();
     }
     const config = PROVIDER_CONFIGS[configKey];
     if (!config) {
@@ -503,5 +506,21 @@ export class ProviderModelFetcherService {
       this.logger.warn(`Failed to fetch models from ${providerId}: ${message}`);
       return [];
     }
+  }
+
+  private async fetchOpencodeGoCatalog(): Promise<DiscoveredModel[]> {
+    if (!this.opencodeGoCatalog) return [];
+    const entries = await this.opencodeGoCatalog.list();
+    return entries.map((entry) => ({
+      id: `opencode-go/${entry.id}`,
+      displayName: entry.displayName,
+      provider: 'opencode-go',
+      contextWindow: OPENCODE_GO_CONTEXT_WINDOW,
+      inputPricePerToken: 0,
+      outputPricePerToken: 0,
+      capabilityReasoning: true,
+      capabilityCode: true,
+      qualityScore: 3,
+    }));
   }
 }

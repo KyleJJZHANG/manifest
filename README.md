@@ -55,9 +55,20 @@ Manifest ships as a [Docker image](https://hub.docker.com/r/manifestdotbuild/man
 bash <(curl -sSL https://raw.githubusercontent.com/mnfst/manifest/main/docker/install.sh)
 ```
 
-The installer downloads the compose file, generates a secret, and brings up the stack. Give it about 30 seconds to boot.
+The installer downloads the compose file into `~/manifest`, generates a secret, and brings up the stack. First boot pulls the app image and Postgres, so give it up to a couple of minutes.
 
-Open [http://localhost:3001](http://localhost:3001) and sign up. The first account you create becomes the admin. Full self-hosting guide: [docker/DOCKER_README.md](docker/DOCKER_README.md).
+Open [http://localhost:2099](http://localhost:2099) and sign up — the first account you create becomes the admin. Confirm the stack is live with `curl -sSf http://localhost:2099/api/v1/health`.
+
+Prefer to look before running a remote script? Download and inspect it first, or do a dry run:
+
+```bash
+curl -sSLO https://raw.githubusercontent.com/mnfst/manifest/main/docker/install.sh
+less install.sh
+bash install.sh --dry-run      # prints what it would do
+bash install.sh --dir /opt/mnfst --yes   # custom location, non-interactive
+```
+
+Full self-hosting guide: [docker/DOCKER_README.md](docker/DOCKER_README.md).
 
 > Docker is the only supported distribution. The legacy `manifest` npm package is deprecated and no longer published.
 
@@ -71,11 +82,15 @@ All routing data (tokens, costs, model, duration) is recorded automatically. You
 
 |              | Manifest                                     | OpenRouter                                          |
 | ------------ | -------------------------------------------- | --------------------------------------------------- |
+| Built for | Personal AI agents and consumer apps | Enterprise API traffic |
 | Architecture | Local. Your requests, your providers         | Cloud proxy. All traffic goes through their servers |
 | Cost         | Free                                         | 5% fee on every API call                            |
 | Source code  | MIT, fully open                              | Proprietary                                         |
 | Data privacy | Metadata only (cloud) or fully local         | Prompts and responses pass through a third party    |
 | Transparency | Open scoring. You see why a model was chosen | No visibility into routing decisions                |
+| Control | Define your model per tier with up to 5 fallbacks each, from complexity tiers (Simple → Reasoning) to specialized ones (Coding, Vision). | Flat fallback list per request, or opaque auto-routing. No user-defined tiers. |
+| Custom providers | Add custom providers and models | Supported providers only, no arbitrary endpoints |
+| Subscription support | Route through flat-rate subscriptions you already pay for (MiniMax $20/mo, etc.) | Pay-per-use billing |
 
 ## Supported providers
 
@@ -95,6 +110,7 @@ Works with 300+ models across these providers. Connect with an API key, or reuse
 | [Z.ai (Zhipu)](https://z.ai/)                                                  |   ✅    | ✅ GLM Coding Plan           |
 | [GitHub Copilot](https://github.com/features/copilot)                          |         | ✅ Copilot subscription      |
 | [OpenRouter](https://openrouter.ai/)                                           |   ✅    |                            |
+| [LM Studio](https://lmstudio.ai/)                                              |   ✅ Local   |                            |
 | [Ollama](https://ollama.com/)                                                  |   ✅ Local   | ✅ Ollama Cloud              |
 | Custom providers (OpenAI-compatible)                                           |   ✅    |                            |
 

@@ -279,6 +279,13 @@ describe('buildSubscriptionFallbackModels', () => {
 
     expect(result.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('returns [] for opencode-go because its catalog is fetched dynamically', () => {
+    // OpenCode Go has no hardcoded knownModels. The fallback path must stay empty
+    // so we do not fabricate stale entries when the live catalog is unreachable.
+    const result = buildSubscriptionFallbackModels(makePricingSync(new Map()), 'opencode-go');
+    expect(result).toEqual([]);
+  });
 });
 
 describe('supplementWithKnownModels', () => {

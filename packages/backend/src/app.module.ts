@@ -24,6 +24,8 @@ import { SseModule } from './sse/sse.module';
 import { GithubModule } from './github/github.module';
 import { PublicStatsModule } from './public-stats/public-stats.module';
 import { SetupModule } from './setup/setup.module';
+import { FreeModelsModule } from './free-models/free-models.module';
+import { TelemetryModule } from './telemetry/telemetry.module';
 
 const frontendPath = resolveFrontendDir();
 const ONE_YEAR_S = 365 * 24 * 60 * 60;
@@ -72,6 +74,8 @@ const serveStaticImports = frontendPath
     GithubModule,
     PublicStatsModule,
     SetupModule,
+    FreeModelsModule,
+    TelemetryModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: SessionGuard },

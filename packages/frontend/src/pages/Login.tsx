@@ -3,6 +3,7 @@ import { Title, Meta } from '@solidjs/meta';
 import { type Component, createSignal, onMount, Show } from 'solid-js';
 import SocialButtons from '../components/SocialButtons.jsx';
 import { authClient } from '../services/auth-client.js';
+import { checkSocialProviders } from '../services/setup-status.js';
 
 const RESEND_COOLDOWN_SECONDS = 60;
 
@@ -13,12 +14,14 @@ const Login: Component = () => {
   const [loading, setLoading] = createSignal(false);
   const [needsVerification, setNeedsVerification] = createSignal(false);
   const [resendCooldown, setResendCooldown] = createSignal(0);
+  const [socialProviders, setSocialProviders] = createSignal<string[]>([]);
   const [searchParams] = useSearchParams();
 
-  onMount(() => {
+  onMount(async () => {
     if (searchParams.error) {
       setError('Login failed. Please try again or use a different method.');
     }
+    setSocialProviders(await checkSocialProviders());
   });
 
   const startCooldown = () => {
@@ -90,11 +93,13 @@ const Login: Component = () => {
         <p class="auth-header__subtitle">Take control of your AI agent costs</p>
       </div>
 
-      <SocialButtons />
+      <SocialButtons enabledProviders={socialProviders()} />
 
-      <div class="auth-divider">
-        <span class="auth-divider__text">or</span>
-      </div>
+      <Show when={socialProviders().length > 0}>
+        <div class="auth-divider">
+          <span class="auth-divider__text">or</span>
+        </div>
+      </Show>
 
       <form class="auth-form" onSubmit={handleSubmit}>
         {error() && (

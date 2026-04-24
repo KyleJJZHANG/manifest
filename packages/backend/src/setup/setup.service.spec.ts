@@ -44,6 +44,178 @@ describe('SetupService', () => {
     jest.clearAllMocks();
   });
 
+  describe('getLocalLlmHost', () => {
+    let originalExistsSync: typeof import('fs').existsSync;
+    beforeEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      originalExistsSync = require('fs').existsSync;
+    });
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').existsSync = originalExistsSync;
+    });
+
+    it("returns 'host.docker.internal' when /.dockerenv exists", () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').existsSync = (p: string) => p === '/.dockerenv';
+      expect(service.getLocalLlmHost()).toBe('host.docker.internal');
+    });
+
+    it("returns 'localhost' when /.dockerenv is absent", () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').existsSync = () => false;
+      expect(service.getLocalLlmHost()).toBe('localhost');
+    });
+
+    it("returns 'localhost' when existsSync throws", () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').existsSync = () => {
+        throw new Error('EACCES');
+      };
+      expect(service.getLocalLlmHost()).toBe('localhost');
+    });
+  });
+
+  describe('isSelfHosted', () => {
+    const originalMode = process.env['MANIFEST_MODE'];
+
+    afterEach(() => {
+      if (originalMode === undefined) delete process.env['MANIFEST_MODE'];
+      else process.env['MANIFEST_MODE'] = originalMode;
+    });
+
+    it('returns true when MANIFEST_MODE is selfhosted', () => {
+      process.env['MANIFEST_MODE'] = 'selfhosted';
+      expect(service.isSelfHosted()).toBe(true);
+    });
+
+    it('returns true for legacy MANIFEST_MODE=local', () => {
+      process.env['MANIFEST_MODE'] = 'local';
+      expect(service.isSelfHosted()).toBe(true);
+    });
+
+    it('returns false when MANIFEST_MODE is cloud', () => {
+      process.env['MANIFEST_MODE'] = 'cloud';
+      expect(service.isSelfHosted()).toBe(false);
+    });
+
+    it('returns false when MANIFEST_MODE is not set', () => {
+      delete process.env['MANIFEST_MODE'];
+      expect(service.isSelfHosted()).toBe(false);
+    });
+  });
+
+  describe('isOllamaAvailable', () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it('returns true when Ollama responds OK', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+      expect(await service.isOllamaAvailable()).toBe(true);
+    });
+
+    it('returns false when Ollama responds with error status', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false }) as unknown as typeof fetch;
+      expect(await service.isOllamaAvailable()).toBe(false);
+    });
+
+    it('returns false when fetch throws (Ollama unreachable)', async () => {
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch;
+      expect(await service.isOllamaAvailable()).toBe(false);
+    });
+
+    it('returns false when fetch is aborted (timeout)', async () => {
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new DOMException('aborted', 'AbortError')) as unknown as typeof fetch;
+      expect(await service.isOllamaAvailable()).toBe(false);
+    });
+
+    it('aborts via AbortController when the 3s timeout fires', async () => {
+      // Capture the timeout callback registered by the service so we can
+      // invoke it explicitly rather than trying to coordinate jest's fake
+      // timers with async AbortController listeners.
+      const realSetTimeout = global.setTimeout;
+      let fired: (() => void) | null = null;
+      global.setTimeout = ((cb: () => void) => {
+        fired = cb;
+        return 0 as unknown as NodeJS.Timeout;
+      }) as unknown as typeof setTimeout;
+
+      try {
+        global.fetch = jest.fn().mockImplementation((_url, init) => {
+          return new Promise((_resolve, reject) => {
+            (init as RequestInit).signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }) as unknown as typeof fetch;
+
+        const pending = service.isOllamaAvailable();
+        expect(fired).not.toBeNull();
+        fired!(); // trigger controller.abort() from setup.service.ts:49
+        expect(await pending).toBe(false);
+      } finally {
+        global.setTimeout = realSetTimeout;
+      }
+    });
+  });
+
+  describe('getEnabledSocialProviders', () => {
+    const envKeys = [
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
+      'GITHUB_CLIENT_ID',
+      'GITHUB_CLIENT_SECRET',
+      'DISCORD_CLIENT_ID',
+      'DISCORD_CLIENT_SECRET',
+    ];
+
+    let savedEnv: Record<string, string | undefined>;
+
+    beforeEach(() => {
+      savedEnv = {};
+      for (const k of envKeys) {
+        savedEnv[k] = process.env[k];
+        delete process.env[k];
+      }
+    });
+
+    afterEach(() => {
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    it('returns empty array when no providers are configured', () => {
+      expect(service.getEnabledSocialProviders()).toEqual([]);
+    });
+
+    it('returns google when both Google env vars are set', () => {
+      process.env['GOOGLE_CLIENT_ID'] = 'id';
+      process.env['GOOGLE_CLIENT_SECRET'] = 'secret';
+      expect(service.getEnabledSocialProviders()).toEqual(['google']);
+    });
+
+    it('returns all three when all providers are configured', () => {
+      for (const k of envKeys) process.env[k] = 'val';
+      expect(service.getEnabledSocialProviders()).toEqual(['google', 'github', 'discord']);
+    });
+
+    it('omits providers with only CLIENT_ID set (no secret)', () => {
+      process.env['GOOGLE_CLIENT_ID'] = 'id';
+      process.env['GITHUB_CLIENT_ID'] = 'id';
+      process.env['GITHUB_CLIENT_SECRET'] = 'secret';
+      expect(service.getEnabledSocialProviders()).toEqual(['github']);
+    });
+  });
+
   describe('needsSetup', () => {
     it('returns true when user table is empty', async () => {
       ds.query.mockResolvedValueOnce([{ count: '0' }]);
@@ -206,6 +378,19 @@ describe('SetupService', () => {
         await expect(service.createFirstAdmin(dto)).rejects.toThrow(ConflictException);
         expect(auth.api.signUpEmail).not.toHaveBeenCalled();
       });
+    });
+
+    it('treats an empty count result as count=0 and proceeds with signup', async () => {
+      runnerQuery
+        .mockResolvedValueOnce(undefined) // pg_advisory_lock
+        .mockResolvedValueOnce([]) // COUNT query returns no rows → rows[0] is undefined
+        .mockResolvedValueOnce(undefined) // UPDATE emailVerified
+        .mockResolvedValueOnce(undefined); // pg_advisory_unlock
+      (auth.api.signUpEmail as jest.Mock).mockResolvedValueOnce({});
+
+      await service.createFirstAdmin(dto);
+
+      expect(auth.api.signUpEmail).toHaveBeenCalled();
     });
 
     it('does not wrap the flow in a TypeORM transaction', async () => {

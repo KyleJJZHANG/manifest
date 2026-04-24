@@ -8,10 +8,12 @@ import {
   For,
   on,
   onCleanup,
+  onMount,
   Show,
   type Component,
 } from 'solid-js';
 import ErrorState from '../components/ErrorState.jsx';
+import FeedbackModal from '../components/FeedbackModal.jsx';
 import MessageTable from '../components/MessageTable.jsx';
 import Pagination from '../components/Pagination.jsx';
 import Select from '../components/Select.jsx';
@@ -23,11 +25,14 @@ import {
   getCustomProviders,
   getMessages,
   getRoutingStatus,
+  setMessageFeedback,
+  clearMessageFeedback,
   type CustomProviderData,
 } from '../services/api.js';
 import { createCursorPagination } from '../services/cursor-pagination.js';
 import { preloadModelDisplayNames } from '../services/model-display.js';
 import { PROVIDERS } from '../services/providers.js';
+import { checkIsSelfHosted } from '../services/setup-status.js';
 import { pingCount } from '../services/sse.js';
 import '../styles/overview.css';
 
@@ -42,6 +47,12 @@ const MessageLog: Component = () => {
   const params = useParams<{ agentName: string }>();
   const navigate = useNavigate();
   preloadModelDisplayNames();
+  const [isSelfHosted, setIsSelfHosted] = createSignal(false);
+  onMount(() => {
+    checkIsSelfHosted().then(setIsSelfHosted);
+  });
+  const columns = () =>
+    isSelfHosted() ? DETAILED_COLUMNS.filter((c) => c !== 'feedback') : DETAILED_COLUMNS;
   const [providerFilter, setProviderFilter] = createSignal('');
   const [costMin, setCostMin] = createSignal('');
   const [costMax, setCostMax] = createSignal('');
@@ -49,6 +60,60 @@ const MessageLog: Component = () => {
   const [setupCompleted] = createSignal(
     !!localStorage.getItem(`setup_completed_${params.agentName}`),
   );
+
+  const [feedbackModalOpen, setFeedbackModalOpen] = createSignal(false);
+  const [feedbackMessageId, setFeedbackMessageId] = createSignal('');
+  const [feedbackOverrides, setFeedbackOverrides] = createSignal<Record<string, string | null>>({});
+
+  const applyFeedbackOverrides = (items: MessageRow[]): MessageRow[] => {
+    const overrides = feedbackOverrides();
+    return items.map((item) =>
+      item.id in overrides ? { ...item, feedback_rating: overrides[item.id] ?? undefined } : item,
+    );
+  };
+
+  const handleFeedbackLike = (id: string) => {
+    setFeedbackOverrides((prev) => ({ ...prev, [id]: 'like' }));
+    setMessageFeedback(id, { rating: 'like' }).catch(() => {
+      setFeedbackOverrides((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    });
+  };
+
+  const handleFeedbackDislike = (id: string) => {
+    setFeedbackOverrides((prev) => ({ ...prev, [id]: 'dislike' }));
+    setFeedbackMessageId(id);
+    setFeedbackModalOpen(true);
+    setMessageFeedback(id, { rating: 'dislike' }).catch(() => {
+      setFeedbackOverrides((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    });
+  };
+
+  const handleFeedbackClear = (id: string) => {
+    setFeedbackOverrides((prev) => ({ ...prev, [id]: null }));
+    clearMessageFeedback(id).catch(() => {
+      setFeedbackOverrides((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    });
+  };
+
+  const handleFeedbackSubmit = (tags: string[], details: string) => {
+    const id = feedbackMessageId();
+    if (id) {
+      setMessageFeedback(id, { rating: 'dislike', tags, details });
+    }
+    setFeedbackModalOpen(false);
+  };
 
   const [customProviders] = createResource(
     () => params.agentName,
@@ -373,11 +438,18 @@ const MessageLog: Component = () => {
               </div>
               <div class="data-table-scroll">
                 <MessageTable
-                  items={data()?.items ?? []}
-                  columns={DETAILED_COLUMNS}
+                  items={
+                    isSelfHosted()
+                      ? (data()?.items ?? [])
+                      : applyFeedbackOverrides(data()?.items ?? [])
+                  }
+                  columns={columns()}
                   agentName={params.agentName}
                   customProviderName={customProviderName}
                   onFallbackErrorClick={scrollToFallbackSuccess}
+                  onFeedbackLike={isSelfHosted() ? undefined : handleFeedbackLike}
+                  onFeedbackDislike={isSelfHosted() ? undefined : handleFeedbackDislike}
+                  onFeedbackClear={isSelfHosted() ? undefined : handleFeedbackClear}
                   rowIdPrefix="msg-"
                   showHeaderTooltips
                   expandable
@@ -404,6 +476,14 @@ const MessageLog: Component = () => {
         agentCategory={agentCategory()}
         onClose={() => setSetupOpen(false)}
       />
+
+      <Show when={!isSelfHosted()}>
+        <FeedbackModal
+          open={feedbackModalOpen()}
+          onClose={() => setFeedbackModalOpen(false)}
+          onSubmit={handleFeedbackSubmit}
+        />
+      </Show>
     </div>
   );
 };

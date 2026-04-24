@@ -18,9 +18,13 @@ vi.mock("@solidjs/meta", () => ({
 
 const mockGetOverview = vi.fn();
 const mockGetCustomProviders = vi.fn();
+const mockSetMessageFeedback = vi.fn();
+const mockClearMessageFeedback = vi.fn();
 vi.mock("../../src/services/api.js", () => ({
   getOverview: (...args: unknown[]) => mockGetOverview(...args),
   getCustomProviders: (...args: unknown[]) => mockGetCustomProviders(...args),
+  setMessageFeedback: (...args: unknown[]) => mockSetMessageFeedback(...args),
+  clearMessageFeedback: (...args: unknown[]) => mockClearMessageFeedback(...args),
 }));
 
 vi.mock("../../src/services/sse.js", () => ({
@@ -41,6 +45,11 @@ vi.mock("../../src/services/formatters.js", () => ({
   customProviderColor: vi.fn(() => '#6366f1'),
 }));
 
+const mockCheckIsSelfHosted = vi.fn(() => Promise.resolve(false));
+vi.mock("../../src/services/setup-status.js", () => ({
+  checkIsSelfHosted: () => mockCheckIsSelfHosted(),
+}));
+
 vi.mock("../../src/components/CostChart.jsx", () => ({
   default: () => <div data-testid="cost-chart" />,
 }));
@@ -51,6 +60,15 @@ vi.mock("../../src/components/TokenChart.jsx", () => ({
 
 vi.mock("../../src/components/SingleTokenChart.jsx", () => ({
   default: () => <div data-testid="single-token-chart" />,
+}));
+
+vi.mock("../../src/components/FeedbackModal.jsx", () => ({
+  default: (props: any) => (
+    <div data-testid="feedback-modal" data-open={props.open ? "true" : "false"}>
+      <button data-testid="feedback-submit" onClick={() => props.onSubmit?.(['Too slow'], 'test')}>Submit</button>
+      <button data-testid="feedback-close" onClick={() => props.onClose?.()}>Close</button>
+    </div>
+  ),
 }));
 
 vi.mock("../../src/components/SetupModal.jsx", () => ({
@@ -305,20 +323,20 @@ describe("Overview", () => {
     mockGetOverview.mockResolvedValue(overviewData);
     const { container } = render(() => <Overview />);
     await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="single-token-chart"]')).not.toBeNull();
+    });
+
+    // Click cost stat
+    const stats = container.querySelectorAll(".chart-card__stat--clickable");
+    fireEvent.click(stats[1]); // cost
+    await vi.waitFor(() => {
       expect(container.querySelector('[data-testid="cost-chart"]')).not.toBeNull();
     });
 
     // Click tokens stat
-    const stats = container.querySelectorAll(".chart-card__stat--clickable");
-    fireEvent.click(stats[1]); // tokens
+    fireEvent.click(stats[2]); // tokens
     await vi.waitFor(() => {
       expect(container.querySelector('[data-testid="token-chart"]')).not.toBeNull();
-    });
-
-    // Click messages stat
-    fireEvent.click(stats[2]); // messages
-    await vi.waitFor(() => {
-      expect(container.querySelector('[data-testid="single-token-chart"]')).not.toBeNull();
     });
   });
 
@@ -388,14 +406,13 @@ describe("Overview", () => {
       ],
     };
 
-    it("renders custom provider icon letter in recent messages", async () => {
+    it("renders custom provider icon in recent messages", async () => {
       mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Groq" }]);
       mockGetOverview.mockResolvedValue(customOverview);
       const { container } = render(() => <Overview />);
       await vi.waitFor(() => {
-        const letter = container.querySelector(".provider-card__logo-letter");
-        expect(letter).not.toBeNull();
-        expect(letter!.textContent).toBe("G");
+        const img = container.querySelector('img[alt="Groq"]');
+        expect(img).not.toBeNull();
       });
     });
 
@@ -414,9 +431,9 @@ describe("Overview", () => {
       mockGetOverview.mockResolvedValue(customOverview);
       const { container } = render(() => <Overview />);
       await vi.waitFor(() => {
-        const letters = container.querySelectorAll(".provider-card__logo-letter");
+        const imgs = container.querySelectorAll('img[alt="Groq"]');
         // At least one in recent messages and one in cost by model
-        expect(letters.length).toBeGreaterThanOrEqual(2);
+        expect(imgs.length).toBeGreaterThanOrEqual(2);
       });
     });
 
@@ -791,6 +808,122 @@ describe("Overview", () => {
       const badge = container.querySelector(".status-badge--fallback_error");
       expect(badge).not.toBeNull();
       expect(badge!.textContent).toBe("fallback_error");
+    });
+  });
+
+  describe("feedback", () => {
+    it("calls setMessageFeedback with like when thumb up is clicked", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn") as HTMLElement;
+      fireEvent.click(likeBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "like" });
+    });
+
+    it("calls setMessageFeedback with dislike and opens modal", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "dislike" });
+      const modal = container.querySelector('[data-testid="feedback-modal"]');
+      expect(modal?.getAttribute("data-open")).toBe("true");
+    });
+
+    it("calls clearMessageFeedback when active like is clicked", async () => {
+      mockClearMessageFeedback.mockResolvedValue(undefined);
+      const dataWithFeedback = {
+        ...overviewData,
+        recent_activity: [{ ...overviewData.recent_activity[0], feedback_rating: "like" }],
+      };
+      mockGetOverview.mockResolvedValue(dataWithFeedback);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn--active-like") as HTMLElement;
+      fireEvent.click(likeBtn);
+      expect(mockClearMessageFeedback).toHaveBeenCalledWith("msg-12345678");
+    });
+
+    it("submits feedback details from modal", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      const submitBtn = container.querySelector('[data-testid="feedback-submit"]') as HTMLElement;
+      fireEvent.click(submitBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "dislike", tags: ["Too slow"], details: "test" });
+    });
+
+    it("hides feedback column and modal in the self-hosted version", async () => {
+      mockCheckIsSelfHosted.mockResolvedValue(true);
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".data-table")).not.toBeNull();
+      });
+      expect(container.querySelector(".feedback-btn")).toBeNull();
+      expect(container.querySelector('[data-testid="feedback-modal"]')).toBeNull();
+      mockCheckIsSelfHosted.mockResolvedValue(false);
+    });
+
+    it("reverts optimistic like on API error", async () => {
+      mockSetMessageFeedback.mockRejectedValue(new Error("fail"));
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn") as HTMLElement;
+      fireEvent.click(likeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).toBeNull();
+      });
+    });
+
+    it("reverts optimistic dislike on API error", async () => {
+      mockSetMessageFeedback.mockRejectedValue(new Error("fail"));
+      mockGetOverview.mockResolvedValue(overviewData);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-dislike")).toBeNull();
+      });
+    });
+
+    it("reverts optimistic clear on API error", async () => {
+      mockClearMessageFeedback.mockRejectedValue(new Error("fail"));
+      const dataWithFeedback = {
+        ...overviewData,
+        recent_activity: [{ ...overviewData.recent_activity[0], feedback_rating: "like" }],
+      };
+      mockGetOverview.mockResolvedValue(dataWithFeedback);
+      const { container } = render(() => <Overview />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn--active-like") as HTMLElement;
+      fireEvent.click(likeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
     });
   });
 });

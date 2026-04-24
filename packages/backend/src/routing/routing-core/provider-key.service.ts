@@ -165,7 +165,7 @@ export class ProviderKeyService {
     return null;
   }
 
-  private async isModelAvailable(agentId: string, model: string): Promise<boolean> {
+  async isModelAvailable(agentId: string, model: string): Promise<boolean> {
     // Check discovered models first
     const discovered = await this.discoveryService.getModelForAgent(agentId, model);
     if (discovered) return true;

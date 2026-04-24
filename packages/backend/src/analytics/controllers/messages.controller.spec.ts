@@ -2,11 +2,17 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MessagesController } from './messages.controller';
 import { MessagesQueryService } from '../services/messages-query.service';
 import { MessageDetailsService } from '../services/message-details.service';
+import { MessageFeedbackService } from '../services/message-feedback.service';
+import { SpecificityFeedbackService } from '../services/specificity-feedback.service';
 
 describe('MessagesController', () => {
   let controller: MessagesController;
   let mockGetMessages: jest.Mock;
   let mockGetDetails: jest.Mock;
+  let mockSetFeedback: jest.Mock;
+  let mockClearFeedback: jest.Mock;
+  let mockFlagMiscategorized: jest.Mock;
+  let mockClearMiscategorized: jest.Mock;
 
   beforeEach(async () => {
     mockGetMessages = jest.fn().mockResolvedValue({
@@ -23,6 +29,11 @@ describe('MessagesController', () => {
       agent_logs: [],
     });
 
+    mockSetFeedback = jest.fn().mockResolvedValue(undefined);
+    mockClearFeedback = jest.fn().mockResolvedValue(undefined);
+    mockFlagMiscategorized = jest.fn().mockResolvedValue(undefined);
+    mockClearMiscategorized = jest.fn().mockResolvedValue(undefined);
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [MessagesController],
       providers: [
@@ -33,6 +44,17 @@ describe('MessagesController', () => {
         {
           provide: MessageDetailsService,
           useValue: { getDetails: mockGetDetails },
+        },
+        {
+          provide: MessageFeedbackService,
+          useValue: { setFeedback: mockSetFeedback, clearFeedback: mockClearFeedback },
+        },
+        {
+          provide: SpecificityFeedbackService,
+          useValue: {
+            flagMiscategorized: mockFlagMiscategorized,
+            clearFlag: mockClearMiscategorized,
+          },
         },
       ],
     }).compile();
@@ -127,5 +149,48 @@ describe('MessagesController', () => {
     const result = await controller.getMessageDetails('msg-1', user as never);
 
     expect(result).toEqual(expected);
+  });
+
+  it('delegates setFeedback to feedback service', async () => {
+    const user = { id: 'u1' };
+    const body = { rating: 'dislike' as const, tags: ['Slow or buggy'], details: 'test' };
+    await controller.setFeedback('msg-1', body, user as never);
+
+    expect(mockSetFeedback).toHaveBeenCalledWith(
+      'msg-1',
+      'u1',
+      'dislike',
+      ['Slow or buggy'],
+      'test',
+    );
+  });
+
+  it('delegates setFeedback with rating only', async () => {
+    const user = { id: 'u1' };
+    const body = { rating: 'like' as const };
+    await controller.setFeedback('msg-1', body, user as never);
+
+    expect(mockSetFeedback).toHaveBeenCalledWith('msg-1', 'u1', 'like', undefined, undefined);
+  });
+
+  it('delegates clearFeedback to feedback service', async () => {
+    const user = { id: 'u1' };
+    await controller.clearFeedback('msg-1', user as never);
+
+    expect(mockClearFeedback).toHaveBeenCalledWith('msg-1', 'u1');
+  });
+
+  it('delegates flagMiscategorized to specificity feedback service', async () => {
+    const user = { id: 'u1' };
+    await controller.flagMiscategorized('msg-1', user as never);
+
+    expect(mockFlagMiscategorized).toHaveBeenCalledWith('msg-1', 'u1');
+  });
+
+  it('delegates clearMiscategorized to specificity feedback service', async () => {
+    const user = { id: 'u1' };
+    await controller.clearMiscategorized('msg-1', user as never);
+
+    expect(mockClearMiscategorized).toHaveBeenCalledWith('msg-1', 'u1');
   });
 });

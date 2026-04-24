@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Not, IsNull, Repository, In } from 'typeorm';
 import { UserProvider } from '../../entities/user-provider.entity';
 import { TierAssignment } from '../../entities/tier-assignment.entity';
+import { SpecificityAssignment } from '../../entities/specificity-assignment.entity';
 import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
 import { TierAutoAssignService } from './tier-auto-assign.service';
 import { RoutingCacheService } from './routing-cache.service';
@@ -24,6 +25,8 @@ export class ProviderService {
     private readonly providerRepo: Repository<UserProvider>,
     @InjectRepository(TierAssignment)
     private readonly tierRepo: Repository<TierAssignment>,
+    @InjectRepository(SpecificityAssignment)
+    private readonly specificityRepo: Repository<SpecificityAssignment>,
     private readonly autoAssign: TierAutoAssignService,
     private readonly pricingCache: ModelPricingCacheService,
     private readonly routingCache: RoutingCacheService,
@@ -225,7 +228,7 @@ export class ProviderService {
       return { notifications: [] };
     }
 
-    const { invalidated } = await this.clearTierAssignmentsForProviders(agentId, [provider]);
+    const { invalidated } = await this.cleanupProviderReferences(agentId, [provider]);
     await this.autoAssign.recalculate(agentId);
     this.routingCache.invalidateAgent(agentId);
 
@@ -301,7 +304,7 @@ export class ProviderService {
     );
 
     if (removedProviders.length > 0) {
-      const { hadTierAssignments } = await this.clearTierAssignmentsForProviders(
+      const { hadTierAssignments } = await this.cleanupProviderReferences(
         agentId,
         removedProviders,
       );
@@ -311,27 +314,44 @@ export class ProviderService {
     }
     this.routingCache.invalidateAgent(agentId);
   }
-  private async clearTierAssignmentsForProviders(
+
+  /**
+   * Clears overrides and fallback entries on both tier_assignments and
+   * specificity_assignments that reference any of the given provider keys.
+   *
+   * A row matches when any of these hold for its override_model/fallback entry:
+   *   - the assignment's override_provider equals the provider key (case-insensitive)
+   *   - the model/entry string starts with `<providerKey>/` (covers custom:<uuid>/... entries
+   *     that don't carry an explicit override_provider, and any fallback_models list where
+   *     provider metadata isn't stored alongside the string)
+   *   - the pricing cache infers the entry belongs to this provider (well-known models)
+   */
+  private async cleanupProviderReferences(
     agentId: string,
     providers: string[],
   ): Promise<{ invalidated: { tier: string; modelName: string }[]; hadTierAssignments: boolean }> {
     if (providers.length === 0) return { invalidated: [], hadTierAssignments: false };
 
     const providerNames = new Set(providers.map((provider) => provider.toLowerCase()));
-    const overrides = await this.tierRepo.find({
-      where: { agent_id: agentId, override_model: Not(IsNull()) },
-    });
+    const prefixKeys = providers.map((provider) => `${provider.toLowerCase()}/`);
+    const modelBelongs = (model: string): boolean => {
+      const lower = model.toLowerCase();
+      if (prefixKeys.some((prefix) => lower.startsWith(prefix))) return true;
+      const pricing = this.pricingCache.getByModel(model)?.provider.toLowerCase();
+      return !!pricing && providerNames.has(pricing);
+    };
 
     const invalidated: { tier: string; modelName: string }[] = [];
+
+    const tierOverrides = await this.tierRepo.find({
+      where: { agent_id: agentId, override_model: Not(IsNull()) },
+    });
     const tiersToSave: TierAssignment[] = [];
-    for (const tier of overrides) {
+    for (const tier of tierOverrides) {
       const overrideProvider = tier.override_provider?.toLowerCase();
-      const pricingProvider = this.pricingCache
-        .getByModel(tier.override_model!)
-        ?.provider.toLowerCase();
       if (
         (overrideProvider && providerNames.has(overrideProvider)) ||
-        (pricingProvider && providerNames.has(pricingProvider))
+        modelBelongs(tier.override_model!)
       ) {
         invalidated.push({ tier: tier.tier, modelName: tier.override_model! });
         tier.override_model = null;
@@ -344,21 +364,47 @@ export class ProviderService {
 
     const allTiers = await this.tierRepo.find({ where: { agent_id: agentId } });
     const hadTierAssignments = allTiers.length > 0;
-    const savedIds = new Set(tiersToSave.map((tier) => tier.id));
+    const savedTierIds = new Set(tiersToSave.map((tier) => tier.id));
     for (const tier of allTiers) {
       if (!tier.fallback_models || tier.fallback_models.length === 0) continue;
-      const filtered = tier.fallback_models.filter((model) => {
-        const pricing = this.pricingCache.getByModel(model);
-        return !pricing || !providerNames.has(pricing.provider.toLowerCase());
-      });
+      const filtered = tier.fallback_models.filter((model) => !modelBelongs(model));
       if (filtered.length !== tier.fallback_models.length) {
         tier.fallback_models = filtered.length > 0 ? filtered : null;
         tier.updated_at = new Date().toISOString();
-        if (!savedIds.has(tier.id)) tiersToSave.push(tier);
+        if (!savedTierIds.has(tier.id)) tiersToSave.push(tier);
       }
     }
 
     if (tiersToSave.length > 0) await this.tierRepo.save(tiersToSave);
+
+    const specificityRows = await this.specificityRepo.find({ where: { agent_id: agentId } });
+    const specToSave: SpecificityAssignment[] = [];
+    for (const row of specificityRows) {
+      let changed = false;
+      const overrideProvider = row.override_provider?.toLowerCase();
+      if (
+        row.override_model !== null &&
+        ((overrideProvider && providerNames.has(overrideProvider)) ||
+          modelBelongs(row.override_model))
+      ) {
+        row.override_model = null;
+        row.override_provider = null;
+        row.override_auth_type = null;
+        changed = true;
+      }
+      if (row.fallback_models && row.fallback_models.length > 0) {
+        const filtered = row.fallback_models.filter((model) => !modelBelongs(model));
+        if (filtered.length !== row.fallback_models.length) {
+          row.fallback_models = filtered.length > 0 ? filtered : null;
+          changed = true;
+        }
+      }
+      if (changed) {
+        row.updated_at = new Date().toISOString();
+        specToSave.push(row);
+      }
+    }
+    if (specToSave.length > 0) await this.specificityRepo.save(specToSave);
 
     return { invalidated, hadTierAssignments };
   }

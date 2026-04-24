@@ -37,6 +37,15 @@ const anthropicBearerHeaders = (apiKey: string): Record<string, string> => ({
   'anthropic-version': '2023-06-01',
 });
 
+// OpenCode Go's /v1/messages endpoint follows the native Anthropic protocol
+// and authenticates via the `x-api-key` header, not `Authorization: Bearer`.
+// Sending a Bearer token yields a "Missing API key" 401 from the upstream.
+const opencodeGoAnthropicHeaders = (apiKey: string): Record<string, string> => ({
+  'x-api-key': apiKey,
+  'Content-Type': 'application/json',
+  'anthropic-version': '2023-06-01',
+});
+
 /**
  * ChatGPT subscription OAuth tokens use the Codex backend,
  * which requires specific headers to avoid 403 responses.
@@ -46,6 +55,7 @@ const anthropicBearerHeaders = (apiKey: string): Record<string, string> => ({
 const CHATGPT_SUBSCRIPTION_BASE = 'https://chatgpt.com/backend-api';
 const MINIMAX_SUBSCRIPTION_BASE = 'https://api.minimax.io/anthropic';
 const ZAI_SUBSCRIPTION_BASE = 'https://open.bigmodel.cn/api/coding/paas/v4';
+const OPENCODE_GO_BASE = 'https://opencode.ai/zen/go';
 const chatgptSubscriptionHeaders = (apiKey: string) => ({
   Authorization: `Bearer ${apiKey}`,
   'Content-Type': 'application/json',
@@ -64,6 +74,14 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     baseUrl: CHATGPT_SUBSCRIPTION_BASE,
     buildHeaders: chatgptSubscriptionHeaders,
     buildPath: () => '/codex/responses',
+    format: 'chatgpt',
+  },
+  // Standard OpenAI API key against api.openai.com/v1/responses — used for
+  // Codex, -pro, o1-pro, and deep-research models that reject /v1/chat/completions.
+  'openai-responses': {
+    baseUrl: 'https://api.openai.com',
+    buildHeaders: openaiHeaders,
+    buildPath: () => '/v1/responses',
     format: 'chatgpt',
   },
   anthropic: {
@@ -166,6 +184,18 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     buildHeaders: openaiHeaders,
     buildPath: openaiPath,
     format: 'openai',
+  },
+  'opencode-go': {
+    baseUrl: OPENCODE_GO_BASE,
+    buildHeaders: openaiHeaders,
+    buildPath: openaiPath,
+    format: 'openai',
+  },
+  'opencode-go-anthropic': {
+    baseUrl: OPENCODE_GO_BASE,
+    buildHeaders: opencodeGoAnthropicHeaders,
+    buildPath: () => '/v1/messages',
+    format: 'anthropic',
   },
 };
 

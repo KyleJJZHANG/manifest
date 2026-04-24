@@ -30,6 +30,11 @@ vi.mock("../../src/services/agent-display-name.js", () => ({
   agentDisplayName: () => mockAgentDisplayName,
 }));
 
+const mockCheckIsSelfHosted = vi.fn().mockResolvedValue(false);
+vi.mock("../../src/services/setup-status.js", () => ({
+  checkIsSelfHosted: () => mockCheckIsSelfHosted(),
+}));
+
 import Header from "../../src/components/Header";
 
 beforeEach(() => {
@@ -37,6 +42,8 @@ beforeEach(() => {
   sessionStorage.clear();
   mockAgentName = null;
   mockAgentDisplayName = null;
+  mockCheckIsSelfHosted.mockReset();
+  mockCheckIsSelfHosted.mockResolvedValue(false);
 });
 
 describe("Header", () => {
@@ -257,5 +264,23 @@ describe("Header - breadcrumb", () => {
     mockAgentName = "my-agent";
     render(() => <Header />);
     expect(screen.getByText("Workspace")).toBeDefined();
+  });
+});
+
+describe("Header - self-hosted badge", () => {
+  it("renders the Self-hosted badge when isSelfHosted is true", async () => {
+    mockCheckIsSelfHosted.mockResolvedValue(true);
+    const { container } = render(() => <Header />);
+    await new Promise((r) => setTimeout(r, 0));
+    const badge = container.querySelector(".header__mode-badge");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent?.trim()).toBe("Self-hosted");
+  });
+
+  it("does not render the badge in cloud mode", async () => {
+    mockCheckIsSelfHosted.mockResolvedValue(false);
+    const { container } = render(() => <Header />);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(container.querySelector(".header__mode-badge")).toBeNull();
   });
 });

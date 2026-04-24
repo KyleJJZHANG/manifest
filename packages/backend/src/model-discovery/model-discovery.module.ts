@@ -5,11 +5,17 @@ import { CustomProvider } from '../entities/custom-provider.entity';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
 import { ProviderModelFetcherService } from './provider-model-fetcher.service';
 import { ModelDiscoveryService } from './model-discovery.service';
+import { OpencodeGoCatalogService } from './opencode-go-catalog.service';
 import { CopilotTokenService } from '../routing/proxy/copilot-token.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([UserProvider, CustomProvider]), ModelPricesModule],
-  providers: [ProviderModelFetcherService, ModelDiscoveryService, CopilotTokenService],
-  exports: [ModelDiscoveryService, ProviderModelFetcherService],
+  providers: [
+    ProviderModelFetcherService,
+    ModelDiscoveryService,
+    OpencodeGoCatalogService,
+    CopilotTokenService,
+  ],
+  exports: [ModelDiscoveryService, ProviderModelFetcherService, OpencodeGoCatalogService],
 })
 export class ModelDiscoveryModule {}

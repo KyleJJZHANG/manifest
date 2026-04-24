@@ -27,6 +27,11 @@ vi.mock("../../src/services/toast-store.js", () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }));
 
+const mockCheckSocialProviders = vi.fn().mockResolvedValue([]);
+vi.mock("../../src/services/setup-status.js", () => ({
+  checkSocialProviders: (...args: unknown[]) => mockCheckSocialProviders(...args),
+}));
+
 import Login from "../../src/pages/Login";
 
 describe("Login", () => {
@@ -34,6 +39,7 @@ describe("Login", () => {
     vi.clearAllMocks();
     mockSearchParams = {};
     mockSignInEmail.mockResolvedValue({});
+    mockCheckSocialProviders.mockResolvedValue([]);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
   });
 
@@ -63,9 +69,20 @@ describe("Login", () => {
     expect(screen.getByText("Forgot password?")).toBeDefined();
   });
 
-  it("shows or divider", () => {
-    render(() => <Login />);
-    expect(screen.getByText("or")).toBeDefined();
+  it("shows or divider when social providers are available", async () => {
+    mockCheckSocialProviders.mockResolvedValue(["google"]);
+    const { container } = render(() => <Login />);
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("or");
+    });
+  });
+
+  it("hides or divider when no social providers are available", async () => {
+    mockCheckSocialProviders.mockResolvedValue([]);
+    const { container } = render(() => <Login />);
+    await vi.waitFor(() => {
+      expect(container.querySelector(".auth-divider")).toBeNull();
+    });
   });
 
   it("submits login form", async () => {

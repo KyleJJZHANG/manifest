@@ -366,10 +366,7 @@ function handleMessageStart(state: StreamState, data: Record<string, unknown>): 
   return makeChunkSse(state.model, { role: 'assistant', content: '' }, null);
 }
 
-function handleContentBlockStart(
-  state: StreamState,
-  data: Record<string, unknown>,
-): string | null {
+function handleContentBlockStart(state: StreamState, data: Record<string, unknown>): string | null {
   const block = data.content_block as Record<string, unknown> | undefined;
   const blockIndex = data.index as number;
 
@@ -412,10 +409,7 @@ function handleContentBlockStart(
   return null;
 }
 
-function handleContentBlockDelta(
-  state: StreamState,
-  data: Record<string, unknown>,
-): string | null {
+function handleContentBlockDelta(state: StreamState, data: Record<string, unknown>): string | null {
   const delta = data.delta as Record<string, unknown> | undefined;
   if (!delta) return null;
   const blockIndex = data.index as number;

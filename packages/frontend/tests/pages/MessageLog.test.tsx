@@ -18,11 +18,15 @@ const mockGetMessages = vi.fn();
 const mockGetCustomProviders = vi.fn();
 const mockGetMessageDetails = vi.fn();
 const mockGetRoutingStatus = vi.fn();
+const mockSetMessageFeedback = vi.fn();
+const mockClearMessageFeedback = vi.fn();
 vi.mock("../../src/services/api.js", () => ({
   getMessages: (...args: unknown[]) => mockGetMessages(...args),
   getCustomProviders: (...args: unknown[]) => mockGetCustomProviders(...args),
   getMessageDetails: (...args: unknown[]) => mockGetMessageDetails(...args),
   getRoutingStatus: (...args: unknown[]) => mockGetRoutingStatus(...args),
+  setMessageFeedback: (...args: unknown[]) => mockSetMessageFeedback(...args),
+  clearMessageFeedback: (...args: unknown[]) => mockClearMessageFeedback(...args),
 }));
 
 vi.mock("../../src/services/sse.js", () => ({
@@ -44,10 +48,24 @@ vi.mock("../../src/services/formatters.js", () => ({
   customProviderColor: vi.fn(() => '#6366f1'),
 }));
 
+const mockCheckIsSelfHosted = vi.fn(() => Promise.resolve(false));
+vi.mock("../../src/services/setup-status.js", () => ({
+  checkIsSelfHosted: () => mockCheckIsSelfHosted(),
+}));
+
 vi.mock("../../src/components/SetupModal.jsx", () => ({
   default: (props: any) => (
     <div data-testid="setup-modal" data-open={props.open ? "true" : "false"} data-agent={props.agentName ?? ""}>
       <button data-testid="setup-close" onClick={() => props.onClose?.()}>Close</button>
+    </div>
+  ),
+}));
+
+vi.mock("../../src/components/FeedbackModal.jsx", () => ({
+  default: (props: any) => (
+    <div data-testid="feedback-modal" data-open={props.open ? "true" : "false"}>
+      <button data-testid="feedback-submit" onClick={() => props.onSubmit?.(['Too slow'], 'test')}>Submit</button>
+      <button data-testid="feedback-close" onClick={() => props.onClose?.()}>Close</button>
     </div>
   ),
 }));
@@ -567,14 +585,13 @@ describe("MessageLog", () => {
       providers: ["custom"],
     };
 
-    it("renders custom provider icon letter in message rows", async () => {
+    it("renders custom provider icon in message rows", async () => {
       mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Groq" }]);
       mockGetMessages.mockResolvedValue(customMessagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        const letter = container.querySelector(".provider-card__logo-letter");
-        expect(letter).not.toBeNull();
-        expect(letter!.textContent).toBe("G");
+        const img = container.querySelector('img[alt="Groq"]');
+        expect(img).not.toBeNull();
       });
     });
 
@@ -856,5 +873,138 @@ describe("MessageLog", () => {
     const badge = container.querySelector(".status-badge--fallback_error")!;
     fireEvent.click(badge);
     expect(scrollSpy).toHaveBeenCalled();
+  });
+
+  describe("feedback", () => {
+    it("calls setMessageFeedback with like when thumb up is clicked", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn") as HTMLElement;
+      fireEvent.click(likeBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "like" });
+    });
+
+    it("calls setMessageFeedback with dislike and opens modal when thumb down is clicked", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "dislike" });
+      const modal = container.querySelector('[data-testid="feedback-modal"]');
+      expect(modal?.getAttribute("data-open")).toBe("true");
+    });
+
+    it("calls clearMessageFeedback when active like is clicked", async () => {
+      mockClearMessageFeedback.mockResolvedValue(undefined);
+      const dataWithFeedback = {
+        ...messagesData,
+        items: [{ ...messagesData.items[0], feedback_rating: "like" }, messagesData.items[1]],
+      };
+      mockGetMessages.mockResolvedValue(dataWithFeedback);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn--active-like") as HTMLElement;
+      fireEvent.click(likeBtn);
+      expect(mockClearMessageFeedback).toHaveBeenCalledWith("msg-12345678");
+    });
+
+    it("submits feedback details from modal", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      // Click dislike to open modal
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      // Submit via modal
+      const submitBtn = container.querySelector('[data-testid="feedback-submit"]') as HTMLElement;
+      fireEvent.click(submitBtn);
+      expect(mockSetMessageFeedback).toHaveBeenCalledWith("msg-12345678", { rating: "dislike", tags: ["Too slow"], details: "test" });
+    });
+
+    it("closes feedback modal without submitting", async () => {
+      mockSetMessageFeedback.mockResolvedValue(undefined);
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      const closeBtn = container.querySelector('[data-testid="feedback-close"]') as HTMLElement;
+      fireEvent.click(closeBtn);
+      const modal = container.querySelector('[data-testid="feedback-modal"]');
+      expect(modal?.getAttribute("data-open")).toBe("false");
+    });
+
+    it("hides feedback column and modal in the self-hosted version", async () => {
+      mockCheckIsSelfHosted.mockResolvedValue(true);
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".data-table")).not.toBeNull();
+      });
+      expect(container.querySelector(".feedback-btn")).toBeNull();
+      expect(container.querySelector('[data-testid="feedback-modal"]')).toBeNull();
+      mockCheckIsSelfHosted.mockResolvedValue(false);
+    });
+
+    it("reverts optimistic like on API error", async () => {
+      mockSetMessageFeedback.mockRejectedValue(new Error("fail"));
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn") as HTMLElement;
+      fireEvent.click(likeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).toBeNull();
+      });
+    });
+
+    it("reverts optimistic dislike on API error", async () => {
+      mockSetMessageFeedback.mockRejectedValue(new Error("fail"));
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn")).not.toBeNull();
+      });
+      const dislikeBtn = container.querySelectorAll(".feedback-btn")[1] as HTMLElement;
+      fireEvent.click(dislikeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-dislike")).toBeNull();
+      });
+    });
+
+    it("reverts optimistic clear on API error", async () => {
+      mockClearMessageFeedback.mockRejectedValue(new Error("fail"));
+      const dataWithFeedback = {
+        ...messagesData,
+        items: [{ ...messagesData.items[0], feedback_rating: "like" }, messagesData.items[1]],
+      };
+      mockGetMessages.mockResolvedValue(dataWithFeedback);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+      const likeBtn = container.querySelector(".feedback-btn--active-like") as HTMLElement;
+      fireEvent.click(likeBtn);
+      await vi.waitFor(() => {
+        expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+    });
   });
 });

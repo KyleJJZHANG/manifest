@@ -21,7 +21,6 @@ export const SUBSCRIPTION_PROVIDER_CONFIGS: Readonly<
     supportsSubscription: true as const,
     subscriptionLabel: 'ChatGPT Plus/Pro/Team',
     subscriptionAuthMode: 'popup_oauth' as const,
-    subscriptionOAuth: true,
     knownModels: Object.freeze([
       'gpt-5.4',
       'gpt-5.3-codex',
@@ -41,6 +40,8 @@ export const SUBSCRIPTION_PROVIDER_CONFIGS: Readonly<
     subscriptionLabel: 'MiniMax Coding Plan',
     subscriptionAuthMode: 'device_code' as const,
     knownModels: Object.freeze([
+      'MiniMax-M2.7',
+      'MiniMax-M2.7-highspeed',
       'MiniMax-M2.5',
       'MiniMax-M2.5-highspeed',
       'MiniMax-M2.1',
@@ -82,6 +83,19 @@ export const SUBSCRIPTION_PROVIDER_CONFIGS: Readonly<
     subscriptionCapabilities: Object.freeze({
       // Z.ai advertises "200K" as 200 * 1024 = 204800, not 200000 like other providers.
       maxContextWindow: 204800,
+      supportsPromptCaching: false,
+      supportsBatching: false,
+    }),
+  }),
+  'opencode-go': Object.freeze({
+    supportsSubscription: true as const,
+    subscriptionLabel: 'OpenCode Go (beta)',
+    subscriptionAuthMode: 'token' as const,
+    subscriptionKeyPlaceholder: 'Paste your OpenCode API key',
+    // Model list is fetched dynamically from the public OpenCode Go docs source;
+    // see OpencodeGoCatalogService in the backend.
+    subscriptionCapabilities: Object.freeze({
+      maxContextWindow: 200000,
       supportsPromptCaching: false,
       supportsBatching: false,
     }),

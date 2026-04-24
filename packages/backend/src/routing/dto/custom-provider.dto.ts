@@ -66,6 +66,17 @@ export class CreateCustomProviderDto {
   models!: CustomProviderModelDto[];
 }
 
+export class ProbeCustomProviderDto {
+  @IsString()
+  @IsNotEmpty()
+  @IsUrl({ require_tld: false, require_protocol: true }, { message: 'Must be a valid URL' })
+  base_url!: string;
+
+  @IsOptional()
+  @IsString()
+  apiKey?: string;
+}
+
 export class UpdateCustomProviderDto {
   @IsOptional()
   @IsString()

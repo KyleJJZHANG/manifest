@@ -9,8 +9,22 @@ export class SetupController {
 
   @Public()
   @Get('status')
-  async getStatus(): Promise<{ needsSetup: boolean }> {
-    return { needsSetup: await this.setupService.needsSetup() };
+  async getStatus(): Promise<{
+    needsSetup: boolean;
+    socialProviders: string[];
+    isSelfHosted: boolean;
+    ollamaAvailable: boolean;
+    localLlmHost: string;
+  }> {
+    const selfHosted = this.setupService.isSelfHosted();
+    const ollamaAvailable = selfHosted ? await this.setupService.isOllamaAvailable() : false;
+    return {
+      needsSetup: await this.setupService.needsSetup(),
+      socialProviders: this.setupService.getEnabledSocialProviders(),
+      isSelfHosted: selfHosted,
+      ollamaAvailable,
+      localLlmHost: this.setupService.getLocalLlmHost(),
+    };
   }
 
   @Public()

@@ -36,6 +36,9 @@ describe('inferProviderFromModel', () => {
     ['qwq-32b', 'qwen'],
     ['copilot/gpt-5.4', 'copilot'],
     ['copilot/claude-opus-4.6', 'copilot'],
+    ['opencode-go/glm-5.1', 'opencode-go'],
+    ['opencode-go/kimi-k2.5', 'opencode-go'],
+    ['opencode-go/minimax-m2.7', 'opencode-go'],
     ['openrouter/auto', 'openrouter'],
     ['anthropic/claude-sonnet-4', 'openrouter'],
   ])('infers %s as %s', (model, expected) => {

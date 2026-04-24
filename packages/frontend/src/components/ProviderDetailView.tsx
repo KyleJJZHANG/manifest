@@ -5,7 +5,6 @@ import { providerIcon } from './ProviderIcon.js';
 import {
   connectProvider,
   disconnectProvider,
-  revokeOpenaiOAuth,
   type RoutingProvider,
   type AuthType,
 } from '../services/api.js';
@@ -14,6 +13,7 @@ import CopyButton from './CopyButton.js';
 import ProviderKeyForm from './ProviderKeyForm.js';
 import OAuthDetailView from './OAuthDetailView.js';
 import DeviceCodeDetailView from './DeviceCodeDetailView.js';
+import { getRoutingProviderApiKeyUrl } from '../services/provider-api-key-urls.js';
 
 export interface ProviderDetailViewProps {
   provId: string;
@@ -67,12 +67,9 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
 
   const isSubMode = () => props.selectedAuthType() === 'subscription';
   const subscriptionAuthMode = () =>
-    provDef.subscriptionAuthMode ??
-    (provDef.subscriptionOAuth ? 'popup_oauth' : undefined) ??
-    (provDef.subscriptionKeyPlaceholder ? 'token' : undefined);
+    provDef.subscriptionAuthMode ?? (provDef.subscriptionKeyPlaceholder ? 'token' : undefined);
   const isPopupOAuthFlow = () => isSubMode() && subscriptionAuthMode() === 'popup_oauth';
   const isDeviceCodeFlow = () => isSubMode() && subscriptionAuthMode() === 'device_code';
-  const shouldRevokeOpenaiOAuth = () => props.provId === 'openai' && isPopupOAuthFlow();
   const isCommandOnly = () =>
     isSubMode() &&
     !!provDef.subscriptionCommand &&
@@ -108,9 +105,6 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
   const handleDisconnect = async () => {
     props.setBusy(true);
     try {
-      if (shouldRevokeOpenaiOAuth()) {
-        await revokeOpenaiOAuth(props.agentName).catch(() => {});
-      }
       const result = await disconnectProvider(
         props.agentName,
         props.provId,
@@ -133,19 +127,16 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
   return (
     <div class="provider-detail">
       {/* Back arrow */}
-      <button class="provider-detail__back" onClick={props.onBack} aria-label="Back to providers">
+      <button class="modal-back-btn" onClick={props.onBack} aria-label="Back to providers">
         <svg
+          xmlns="http://www.w3.org/2000/svg"
           width="16"
           height="16"
+          fill="currentColor"
           viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
           aria-hidden="true"
         >
-          <path d="m15 18-6-6 6-6" />
+          <path d="M14.71 7.29a.996.996 0 0 0-1.41 0l-4 4a.996.996 0 0 0 0 1.41l4 4c.2.2.45.29.71.29s.51-.1.71-.29a.996.996 0 0 0 0-1.41L11.43 12l3.29-3.29a.996.996 0 0 0 0-1.41Z" />
         </svg>
       </button>
 
@@ -174,12 +165,49 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
           )}
         </span>
         <div class="provider-detail__title-group">
-          <div class="provider-detail__name">{provDef.name}</div>
+          <div class="provider-detail__name">
+            {provDef.name}
+            <Show when={provDef.beta}>
+              <span class="provider-detail__beta-badge">beta</span>
+            </Show>
+          </div>
         </div>
         <Show when={props.provId === 'anthropic'}>
           <AnthropicCreditsLink />
         </Show>
       </div>
+
+      {/* Subscription sign-in URL instruction (token mode with external sign-in) */}
+      <Show when={isSubMode() && provDef.subscriptionSignInUrl}>
+        <p class="provider-detail__hint">
+          {provDef.subscriptionSignInHint ??
+            `Sign in to your ${provDef.name} account to get your API key, then paste it below.`}
+        </p>
+        <a
+          class="btn btn--primary btn--sm provider-detail__signin-btn"
+          href={provDef.subscriptionSignInUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`${provDef.subscriptionSignInLabel ?? 'Sign in'} (opens in a new tab)`}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            <polyline points="15 3 21 3 21 9" />
+            <line x1="10" y1="14" x2="21" y2="3" />
+          </svg>
+          {provDef.subscriptionSignInLabel ?? 'Sign in'}
+        </a>
+      </Show>
 
       {/* Subscription terminal instruction */}
       <Show when={isSubMode() && provDef.subscriptionCommand}>
@@ -269,6 +297,17 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
       <Show when={isOllama}>
         <div class="provider-detail__field">
           <span class="provider-detail__no-key">No API key required for local models</span>
+          <Show when={getRoutingProviderApiKeyUrl(props.provId)}>
+            <a
+              href={getRoutingProviderApiKeyUrl(props.provId)}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="provider-detail__docs-link"
+              style="margin-left: 8px; font-size: var(--font-size-sm); color: hsl(var(--muted-foreground));"
+            >
+              Get {provDef.name} ↗
+            </a>
+          </Show>
         </div>
         <Show when={!connected()}>
           <button

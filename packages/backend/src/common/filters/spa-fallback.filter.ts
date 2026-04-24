@@ -3,6 +3,7 @@ import { Response, Request } from 'express';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import { resolveFrontendDir } from '../utils/frontend-path';
+import { rewriteOgTags } from '../utils/og-rewrite';
 
 const API_PREFIXES = ['/api/', '/otlp/', '/v1/'];
 
@@ -10,9 +11,11 @@ const API_PREFIXES = ['/api/', '/otlp/', '/v1/'];
 export class SpaFallbackFilter implements ExceptionFilter {
   private readonly indexContent: string | null;
 
-  constructor() {
+  constructor(betterAuthUrl?: string) {
     const frontendDir = resolveFrontendDir();
-    this.indexContent = frontendDir ? readFileSync(join(frontendDir, 'index.html'), 'utf-8') : null;
+    const raw = frontendDir ? readFileSync(join(frontendDir, 'index.html'), 'utf-8') : null;
+    const baseUrl = betterAuthUrl ?? process.env['BETTER_AUTH_URL'] ?? '';
+    this.indexContent = raw ? rewriteOgTags(raw, baseUrl) : null;
   }
 
   catch(exception: NotFoundException, host: ArgumentsHost) {

@@ -86,6 +86,8 @@ describe('resolveEndpointKey', () => {
     expect(known).toContain('openrouter');
     expect(known).toContain('ollama');
     expect(known).toContain('ollama-cloud');
+    expect(known).toContain('opencode-go');
+    expect(known).toContain('opencode-go-anthropic');
   });
 
   it('resolves ollama-cloud to ollama-cloud', () => {
@@ -93,8 +95,18 @@ describe('resolveEndpointKey', () => {
     expect(resolveEndpointKey('Ollama-Cloud')).toBe('ollama-cloud');
   });
 
-  it('resolves every built-in provider id and alias from the registry', () => {
+  it('resolves opencode-go and its opencodego alias', () => {
+    expect(resolveEndpointKey('opencode-go')).toBe('opencode-go');
+    expect(resolveEndpointKey('OpenCode-Go')).toBe('opencode-go');
+    expect(resolveEndpointKey('opencodego')).toBe('opencode-go');
+  });
+
+  it('resolves every proxy-capable provider id and alias from the registry', () => {
+    // tileOnly providers (LM Studio) don't have a fixed proxy endpoint —
+    // they deep-link to the local-server detail view and route through
+    // the `custom:<uuid>` path once connected.
     for (const entry of PROVIDER_REGISTRY) {
+      if (entry.tileOnly) continue;
       expect(resolveEndpointKey(entry.id)).not.toBeNull();
       for (const alias of entry.aliases) {
         expect(resolveEndpointKey(alias)).not.toBeNull();
@@ -252,6 +264,38 @@ describe('PROVIDER_ENDPOINTS', () => {
       Authorization: 'Bearer zai-api-key',
       'Content-Type': 'application/json',
     });
+  });
+
+  it('opencode-go uses OpenCode base URL with OpenAI format', () => {
+    const ep = PROVIDER_ENDPOINTS['opencode-go'];
+    expect(ep.baseUrl).toBe('https://opencode.ai/zen/go');
+    expect(ep.format).toBe('openai');
+    expect(ep.buildPath('glm-5.1')).toBe('/v1/chat/completions');
+  });
+
+  it('opencode-go uses Bearer auth headers', () => {
+    const headers = PROVIDER_ENDPOINTS['opencode-go'].buildHeaders('og-token');
+    expect(headers).toEqual({
+      Authorization: 'Bearer og-token',
+      'Content-Type': 'application/json',
+    });
+  });
+
+  it('opencode-go-anthropic uses Anthropic format with /v1/messages', () => {
+    const ep = PROVIDER_ENDPOINTS['opencode-go-anthropic'];
+    expect(ep.baseUrl).toBe('https://opencode.ai/zen/go');
+    expect(ep.format).toBe('anthropic');
+    expect(ep.buildPath('minimax-m2.7')).toBe('/v1/messages');
+  });
+
+  it('opencode-go-anthropic uses x-api-key (not Bearer) with anthropic-version header', () => {
+    const headers = PROVIDER_ENDPOINTS['opencode-go-anthropic'].buildHeaders('og-token');
+    expect(headers).toEqual({
+      'x-api-key': 'og-token',
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+    });
+    expect(headers['Authorization']).toBeUndefined();
   });
 });
 

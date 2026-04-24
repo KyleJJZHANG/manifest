@@ -40,10 +40,7 @@ export function convertGoogleResponse(
 }
 
 /** Convert a Google SSE chunk to OpenAI SSE format. */
-export function convertGoogleStreamChunk(
-  chunk: string,
-  model: string,
-): GoogleStreamChunkResult {
+export function convertGoogleStreamChunk(chunk: string, model: string): GoogleStreamChunkResult {
   return transformGoogleStreamChunk(chunk, model);
 }
 

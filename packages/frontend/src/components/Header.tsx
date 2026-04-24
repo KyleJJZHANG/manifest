@@ -4,6 +4,7 @@ import { useAgentName } from '../services/routing.js';
 import { authClient } from '../services/auth-client.js';
 import { agentDisplayName } from '../services/agent-display-name.js';
 import { agentPlatformIcon } from '../services/agent-platform-store.js';
+import { checkIsSelfHosted } from '../services/setup-status.js';
 
 const GITHUB_REPO = 'mnfst/manifest';
 const STAR_DISMISSED_KEY = 'github-star-dismissed';
@@ -19,10 +20,12 @@ const Header: Component = () => {
   const [starDismissed, setStarDismissed] = createSignal(
     sessionStorage.getItem(STAR_DISMISSED_KEY) === 'true',
   );
+  const [isSelfHosted, setIsSelfHosted] = createSignal(false);
   const session = authClient.useSession();
   const navigate = useNavigate();
 
   onMount(() => {
+    checkIsSelfHosted().then(setIsSelfHosted);
     if (!starDismissed()) {
       const cachedCount = sessionStorage.getItem(STAR_CACHE_KEY);
       const cachedTs = sessionStorage.getItem(STAR_CACHE_TS_KEY);
@@ -104,6 +107,11 @@ const Header: Component = () => {
             class="header__logo-img header__logo-img--dark"
           />
         </A>
+        <Show when={isSelfHosted()}>
+          <span class="header__mode-badge" title="Running on the self-hosted version of Manifest">
+            Self-hosted
+          </span>
+        </Show>
         <Show when={getAgentName()}>
           <span class="header__separator">/</span>
           <A href="/" class="header__breadcrumb-link">
