@@ -201,12 +201,18 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
 
 /** Build a ProviderEndpoint for a custom provider with the given base URL. */
 export function buildCustomEndpoint(baseUrl: string): ProviderEndpoint {
-  // Strip trailing /v1 (or /v1/) since openaiPath already includes /v1
   const normalized = normalizeProviderBaseUrl(baseUrl);
+  // When the base URL already pins a non-v1 version segment (e.g. Volcano
+  // Engine Ark at .../coding/v3), append only /chat/completions — the vendor
+  // doesn't expose a /v1 subpath underneath. Otherwise keep the OpenAI
+  // default /v1/chat/completions so plain hosts like http://localhost:8000
+  // keep working.
+  const hasVersionSuffix = /\/v\d+$/.test(normalized);
+  const path = hasVersionSuffix ? '/chat/completions' : '/v1/chat/completions';
   return {
     baseUrl: normalized,
     buildHeaders: openaiHeaders,
-    buildPath: openaiPath,
+    buildPath: () => path,
     format: 'openai',
   };
 }

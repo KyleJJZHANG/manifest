@@ -35,6 +35,22 @@ describe('buildCustomEndpoint', () => {
 
     expect(path).toBe('/v1/chat/completions');
   });
+
+  it('skips /v1 prefix when base URL already pins a versioned root', () => {
+    // Volcano Engine Ark exposes /api/coding/v3/chat/completions — there's no
+    // /v1 subpath underneath, so appending /v1/chat/completions would 404.
+    const endpoint = buildCustomEndpoint('https://ark.cn-beijing.volces.com/api/coding/v3');
+
+    expect(endpoint.baseUrl).toBe('https://ark.cn-beijing.volces.com/api/coding/v3');
+    expect(endpoint.buildPath('minimax-m2.7')).toBe('/chat/completions');
+  });
+
+  it('handles versioned base URL with a trailing slash', () => {
+    const endpoint = buildCustomEndpoint('https://ark.cn-beijing.volces.com/api/coding/v3/');
+
+    expect(endpoint.baseUrl).toBe('https://ark.cn-beijing.volces.com/api/coding/v3');
+    expect(endpoint.buildPath('minimax-m2.7')).toBe('/chat/completions');
+  });
 });
 
 describe('resolveEndpointKey', () => {
