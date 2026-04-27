@@ -484,6 +484,29 @@ describe('pipeStream', () => {
     });
   });
 
+  it('captures cached_tokens from prompt_tokens_details in passthrough stream', async () => {
+    // Real-world Volcengine Ark / DeepSeek streaming usage chunk
+    const { res } = mockResponse();
+    const usageChunk = `data: ${JSON.stringify({
+      choices: [],
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 120,
+        prompt_tokens_details: { cached_tokens: 320 },
+      },
+    })}\n\n`;
+    const stream = createReadableStream([usageChunk, 'data: [DONE]\n\n']);
+
+    const usage = await pipeStream(stream, res as never);
+
+    expect(usage).toEqual({
+      prompt_tokens: 500,
+      completion_tokens: 120,
+      cache_read_tokens: 320,
+      cache_creation_tokens: undefined,
+    });
+  });
+
   it('should capture usage from leftover passthrough buffer', async () => {
     const { res } = mockResponse();
     const usagePayload = JSON.stringify({
@@ -601,6 +624,47 @@ describe('extractUsageFromSse', () => {
       prompt_tokens: 100,
       completion_tokens: 0,
       cache_read_tokens: undefined,
+      cache_creation_tokens: undefined,
+    });
+  });
+
+  it('falls back to prompt_tokens_details.cached_tokens (OpenAI standard)', () => {
+    // Volcengine Ark / native DeepSeek / OpenAI emit cache info under
+    // `prompt_tokens_details.cached_tokens` rather than `cache_read_tokens`.
+    const sseText = `data: ${JSON.stringify({
+      choices: [],
+      usage: {
+        prompt_tokens: 1200,
+        completion_tokens: 80,
+        prompt_tokens_details: { cached_tokens: 950 },
+      },
+    })}\n\n`;
+
+    expect(extractUsageFromSse(sseText)).toEqual({
+      prompt_tokens: 1200,
+      completion_tokens: 80,
+      cache_read_tokens: 950,
+      cache_creation_tokens: undefined,
+    });
+  });
+
+  it('prefers explicit cache_read_tokens over prompt_tokens_details', () => {
+    // When an adapter has already converted to the manifest-internal field,
+    // the explicit value wins (matches Anthropic adapter, which writes both).
+    const sseText = `data: ${JSON.stringify({
+      choices: [],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cache_read_tokens: 30,
+        prompt_tokens_details: { cached_tokens: 999 },
+      },
+    })}\n\n`;
+
+    expect(extractUsageFromSse(sseText)).toEqual({
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cache_read_tokens: 30,
       cache_creation_tokens: undefined,
     });
   });

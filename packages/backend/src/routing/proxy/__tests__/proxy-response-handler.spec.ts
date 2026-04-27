@@ -915,6 +915,39 @@ describe('proxy-response-handler', () => {
       expect(usage!.completion_tokens).toBe(0);
     });
 
+    it('reads cached_tokens from prompt_tokens_details (OpenAI standard)', async () => {
+      // Volcengine Ark / native DeepSeek / OpenAI emit cache info under
+      // prompt_tokens_details.cached_tokens, not the manifest-internal
+      // cache_read_tokens. Without the fallback, custom OpenAI-compatible
+      // providers always recorded 0 cache tokens.
+      const { res } = mockResponse();
+      const client = mockProviderClient();
+      const body = {
+        usage: {
+          prompt_tokens: 1500,
+          completion_tokens: 80,
+          prompt_tokens_details: { cached_tokens: 1200 },
+        },
+      };
+      const forward = mockForward(body);
+      const meta = makeMeta();
+
+      const usage = await handleNonStreamResponse(
+        res as any,
+        forward as any,
+        meta,
+        {},
+        client as any,
+      );
+
+      expect(usage).toEqual({
+        prompt_tokens: 1500,
+        completion_tokens: 80,
+        cache_read_tokens: 1200,
+        cache_creation_tokens: undefined,
+      });
+    });
+
     it('should cache extracted thought_signatures from Google non-stream response', async () => {
       const { res } = mockResponse();
       const client = mockProviderClient();

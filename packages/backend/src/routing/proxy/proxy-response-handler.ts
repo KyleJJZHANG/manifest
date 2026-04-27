@@ -6,7 +6,7 @@ import { FailedFallback } from './proxy-fallback.service';
 import { ForwardResult } from './provider-client';
 import { ProxyMessageRecorder } from './proxy-message-recorder';
 import { ProviderClient } from './provider-client';
-import { initSseHeaders, pipeStream, StreamUsage } from './stream-writer';
+import { initSseHeaders, pickCacheReadTokens, pipeStream, StreamUsage } from './stream-writer';
 import { sanitizeProviderError } from './proxy-error-sanitizer';
 import type { ThoughtSignatureCache } from './thought-signature-cache';
 import type { ThinkingBlockCache, ThinkingBlock } from './thinking-block-cache';
@@ -339,7 +339,7 @@ export async function handleNonStreamResponse(
     streamUsage = {
       prompt_tokens: usage.prompt_tokens,
       completion_tokens: usage.completion_tokens ?? 0,
-      cache_read_tokens: usage.cache_read_tokens,
+      cache_read_tokens: pickCacheReadTokens(usage as Record<string, unknown>),
       cache_creation_tokens: usage.cache_creation_tokens,
     };
   }

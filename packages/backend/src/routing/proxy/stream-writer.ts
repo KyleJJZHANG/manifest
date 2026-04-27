@@ -7,6 +7,26 @@ export interface StreamUsage {
   cache_creation_tokens?: number;
 }
 
+/**
+ * Pick cached-input tokens from an OpenAI-compatible `usage` object.
+ *
+ * Prefers the manifest-internal `cache_read_tokens` field (already populated by
+ * the Anthropic / ChatGPT adapters) and falls back to the OpenAI standard
+ * `prompt_tokens_details.cached_tokens` — which is what raw passthrough
+ * providers emit (Volcengine Ark, native DeepSeek, MiniMax, OpenAI itself).
+ * Without this fallback, custom OpenAI-compatible providers always recorded 0
+ * even when the upstream actually served from cache.
+ */
+export function pickCacheReadTokens(usage: Record<string, unknown>): number | undefined {
+  if (typeof usage.cache_read_tokens === 'number') return usage.cache_read_tokens;
+  const details = usage.prompt_tokens_details;
+  if (details && typeof details === 'object' && !Array.isArray(details)) {
+    const cached = (details as Record<string, unknown>).cached_tokens;
+    if (typeof cached === 'number') return cached;
+  }
+  return undefined;
+}
+
 /** Extract usage data from an SSE-formatted text chunk (e.g. `data: {...}\n\n`). */
 export function extractUsageFromSse(sseText: string): StreamUsage | null {
   for (const line of sseText.split('\n')) {
@@ -20,7 +40,7 @@ export function extractUsageFromSse(sseText: string): StreamUsage | null {
         return {
           prompt_tokens: obj.usage.prompt_tokens,
           completion_tokens: obj.usage.completion_tokens ?? 0,
-          cache_read_tokens: obj.usage.cache_read_tokens,
+          cache_read_tokens: pickCacheReadTokens(obj.usage),
           cache_creation_tokens: obj.usage.cache_creation_tokens,
         };
       }
@@ -132,7 +152,7 @@ export async function pipeStream(
                 capturedUsage = {
                   prompt_tokens: obj.usage.prompt_tokens,
                   completion_tokens: obj.usage.completion_tokens ?? 0,
-                  cache_read_tokens: obj.usage.cache_read_tokens,
+                  cache_read_tokens: pickCacheReadTokens(obj.usage),
                   cache_creation_tokens: obj.usage.cache_creation_tokens,
                 };
               }
@@ -160,7 +180,7 @@ export async function pipeStream(
             capturedUsage = {
               prompt_tokens: obj.usage.prompt_tokens,
               completion_tokens: obj.usage.completion_tokens ?? 0,
-              cache_read_tokens: obj.usage.cache_read_tokens,
+              cache_read_tokens: pickCacheReadTokens(obj.usage),
               cache_creation_tokens: obj.usage.cache_creation_tokens,
             };
           }
