@@ -26,10 +26,42 @@
 
 ## 前置要求
 
-- **本机**：Windows + Docker Desktop（或任意装了 docker 的机器）
-- **本机**：能 ssh 到服务器
-- **本机**：本仓库完整 clone 在 `D:\Dev\HyCore\DigitalTwin\AutoAmazon\BrowserOS\ModelMgm\manifest`
-- **服务器**：docker + docker compose v2 在跑（已验证）
+### 本机
+
+- Windows + Docker Desktop（或任意装了 docker 的机器）
+- 能 ssh 到服务器（推荐用 ssh-key，密码也行）
+- 本仓库完整 clone 在 `D:\Dev\HyCore\DigitalTwin\AutoAmazon\BrowserOS\ModelMgm\manifest`
+
+### 服务器
+
+- docker 20.10+ + docker compose v2（已验证：`iZt4ndy9zj9ipgzddxq66cZ` 在跑）
+- nginx 装好且在反代（已验证）
+- HTTPS 证书有效（Let's Encrypt 自动续期）
+- 防火墙 / 阿里云安全组放行：**80**（HTTP 跳转）、**443**（HTTPS）。3001 不要对公网开放，让 nginx 转发
+- 域名 DNS A 记录已指向服务器 IP（当前：`manifest.andone.dsbdns.hycoretech.cn`）
+
+### SSH 配置（首次访问服务器才需要）
+
+```bash
+# 本机生成 ssh key（已有可跳过）
+ssh-keygen -t ed25519 -C "kylez@hycore"
+
+# 把公钥扔到服务器
+ssh-copy-id root@iZt4ndy9zj9ipgzddxq66cZ
+# 或者手动追加：
+#   cat ~/.ssh/id_ed25519.pub | ssh root@iZt4ndy9zj9ipgzddxq66cZ \
+#     'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+
+# 写 ~/.ssh/config 起别名（可选，但很省事）
+cat >> ~/.ssh/config <<'EOF'
+Host hycore-manifest
+    HostName iZt4ndy9zj9ipgzddxq66cZ
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+EOF
+
+# 之后用 `ssh hycore-manifest` 就能直连
+```
 
 ---
 
@@ -340,3 +372,213 @@ docker inspect $(docker compose ps -q manifest) --format='{{.Config.Image}}  {{.
 5. `docker compose up -d --no-deps manifest`
 
 建议每次用不同 tag（比如 `manifest-hycore:20260422`、`manifest-hycore:body50mb`），方便回滚和追溯。
+
+---
+
+## nginx 配置（首次部署 + 升级现有）
+
+> **场景说明**：
+> - **首次部署到全新服务器** → 跑下面 §A 全套（装 nginx + 写配置 + certbot 申请证书）
+> - **服务器已有 nginx 在反代 manifest** → 跳到 §B，只补充图片传输需要的 `client_max_body_size` 等配置
+> - **升级 5mb 镜像后发现 BrowserOS 截图请求被 nginx 挡了** → 直接看 §B
+
+Manifest 的 `/v1/chat/completions` 代理 LLM 请求时，会**透传完整对话历史**，里面常带 base64 截图。后端 `packages/backend/src/main.ts:95-96` 把 express.json limit 调到了 `5mb`，但**nginx 默认 `client_max_body_size` 只有 1MB**，截图请求会先于应用层被 nginx 用 `413 Request Entity Too Large` 干掉。所以镜像升级和 nginx 升级**必须同时做**才完整。
+
+### §A 首次部署 nginx + HTTPS（全新服务器）
+
+#### A.1 装 nginx + certbot
+
+```bash
+ssh root@iZt4ndy9zj9ipgzddxq66cZ
+apt update && apt install -y nginx certbot python3-certbot-nginx
+```
+
+#### A.2 写 nginx 配置（**含图片传输支持**）
+
+```bash
+cat > /etc/nginx/sites-available/manifest <<'EOF'
+upstream manifest_app {
+    server 127.0.0.1:3001;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name manifest.andone.dsbdns.hycoretech.cn;
+
+    # === 图片 / 截图传输关键配置 ===
+    # Manifest 后端 express.json limit = 5MB（含 base64 截图）
+    # nginx 这层留 2x headroom，免得合法请求先于应用层被挡
+    client_max_body_size 10M;
+    client_body_timeout 60s;
+    client_body_buffer_size 1M;
+
+    # === LLM 长响应必备 ===
+    # Claude/GPT 大请求 + 流式生成可能 60s+，默认 60s 不够
+    proxy_connect_timeout 10s;
+    proxy_send_timeout    300s;
+    proxy_read_timeout    300s;
+
+    # === SSE / 流式响应 ===
+    # 后端 /api/v1/events 是 SSE，buffering 一开前端永远收不到增量
+    # /v1/chat/completions 流式模式同理
+    proxy_buffering off;
+    proxy_cache     off;
+    proxy_request_buffering off;
+
+    location / {
+        proxy_pass http://manifest_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+    }
+}
+EOF
+```
+
+> **EOF 必须顶格、单独一行**，否则 heredoc 不结束、终端会卡在 `>` 提示符。
+
+#### A.3 启用 + 测试
+
+```bash
+ln -s /etc/nginx/sites-available/manifest /etc/nginx/sites-enabled/
+nginx -t                    # 必须看到 "syntax is ok" + "test is successful"
+systemctl reload nginx
+```
+
+#### A.4 申请 HTTPS（certbot 自动改 nginx 配置）
+
+```bash
+certbot --nginx -d manifest.andone.dsbdns.hycoretech.cn
+```
+
+按提示输邮箱、同意条款。Certbot 会自动：
+- 申请 Let's Encrypt 证书
+- 在 nginx 配置里加 SSL block
+- 加 HTTP → HTTPS 301 重定向
+- 写 cron 自动续期（90 天周期）
+
+> **注意**：certbot 改完后会重写 `/etc/nginx/sites-available/manifest`。`client_max_body_size` 等指令会被保留（certbot 是追加 SSL block 而非全文替换），但**重启后再核对一遍**：
+> ```bash
+> grep -E 'client_max_body_size|proxy_(read|send)_timeout|proxy_buffering' \
+>     /etc/nginx/sites-available/manifest
+> ```
+> 如果丢了，重新 `cat` 一份覆盖即可。
+
+#### A.5 验证
+
+```bash
+# 服务器内
+curl -i http://localhost:3001/api/v1/health
+curl -i https://manifest.andone.dsbdns.hycoretech.cn/api/v1/health
+
+# 测大请求体不被挡（构造 2.5MB JSON，超过 nginx 默认 1MB 但小于 10MB）
+python3 -c "import json; print(json.dumps({'model':'auto','messages':[{'role':'user','content':'x'*2500000}]}))" > /tmp/big.json
+curl -i -X POST https://manifest.andone.dsbdns.hycoretech.cn/v1/chat/completions \
+    -H "Authorization: Bearer mnfst_<your_key>" \
+    -H "Content-Type: application/json" \
+    --data-binary @/tmp/big.json | head -3
+# 应该看到 200 OK，不能是 413 Request Entity Too Large
+```
+
+---
+
+### §B 升级现有 nginx（已有反代，只补图片传输配置）
+
+#### B.1 找到现有配置
+
+```bash
+# 通常在以下之一
+ls /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null
+
+# 或者直接 grep manifest 域名
+grep -rl 'manifest.andone' /etc/nginx/
+```
+
+记下文件路径，比如 `/etc/nginx/sites-available/manifest`。
+
+#### B.2 看现状
+
+```bash
+grep -E 'client_max_body_size|proxy_(read|send)_timeout|proxy_buffering' \
+    /etc/nginx/sites-available/manifest
+
+# 没输出 → 用的全是 nginx 默认（1MB body / 60s timeout / buffering on）→ 必须加
+# 有 client_max_body_size 1m 之类小值 → 必须改
+# 有 client_max_body_size 10M 且 proxy_*_timeout 300s → 已经 OK，跳过
+```
+
+#### B.3 备份 + 改
+
+```bash
+cp /etc/nginx/sites-available/manifest \
+   /etc/nginx/sites-available/manifest.bak.$(date +%Y%m%d-%H%M)
+
+# 在 manifest 域名的 server { ... } 块内插入下面这段（位置：listen 之后、location 之前）
+```
+
+要插入的内容（如果原配置里没有的话）：
+
+```nginx
+    client_max_body_size 10M;
+    client_body_timeout 60s;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout    300s;
+    proxy_read_timeout    300s;
+    proxy_buffering off;
+    proxy_cache     off;
+    proxy_request_buffering off;
+```
+
+如果你的原 location 块里只有 `proxy_pass` 没有 `proxy_http_version` / `Connection ""`，建议补上：
+
+```nginx
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+    }
+```
+
+`Connection ""` + `proxy_http_version 1.1` 是 SSE 必须，否则 nginx 会主动关连接。
+
+#### B.4 reload
+
+```bash
+nginx -t                  # 改完先 dry-run
+systemctl reload nginx    # reload 不断连接，比 restart 安全
+```
+
+`reload` 不会中断已有连接，比 `restart` 安全。如果 `nginx -t` 报错，**不要 reload**，先回滚到 `.bak` 文件再排查。
+
+#### B.5 验证（同 A.5）
+
+最关键：
+
+```bash
+# 用 BrowserOS 真实截图请求或构造 2-5MB JSON 测
+curl -i -X POST https://manifest.andone.dsbdns.hycoretech.cn/v1/chat/completions \
+    -H "Authorization: Bearer mnfst_..." -H "Content-Type: application/json" \
+    --data-binary @/tmp/big.json | head -3
+# 升级前: HTTP/1.1 413 Request Entity Too Large
+# 升级后: HTTP/1.1 200 OK
+```
+
+---
+
+### nginx 配置常见错误一览
+
+| 现象 | 多半是 | 怎么修 |
+|---|---|---|
+| `413 Request Entity Too Large` | `client_max_body_size` 太小 | 加大到 10M |
+| `504 Gateway Timeout`（大请求 / LLM 长响应） | `proxy_read_timeout` 太短 | 加大到 300s |
+| 前端 SSE / streaming 收不到增量，等到全部完成才出现 | `proxy_buffering on`（默认）| 加 `proxy_buffering off` |
+| nginx 启动不了，certbot 续期失败 | sites-enabled 里有半成品配置 | `nginx -t` 看具体哪行错，删掉或修好 |
+| `502 Bad Gateway` | manifest 容器 down 了，或 PORT 不对 | `docker compose ps` + 检查 nginx upstream 端口 |

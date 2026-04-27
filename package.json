@@ -36,7 +36,7 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "test": "turbo test",
-    "start": "node packages/backend/dist/main.js",
+    "start": "node -r dotenv/config packages/backend/dist/main.js dotenv_config_path=packages/backend/.env",
     "check:api-prefix": "node scripts/check-api-prefix.js",
     "lint": "eslint packages/shared/src packages/backend/src packages/frontend/src",
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx,css}'",
@@ -71,5 +71,8 @@
     "lint-staged": "^16.3.1",
     "prettier": "^3.8.1",
     "turbo": "^2"
+  },
+  "dependencies": {
+    "manifest-backend": "^0.1.0"
   }
 }

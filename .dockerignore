@@ -15,6 +15,8 @@ coverage/
 *.tsbuildinfo
 *.tmp
 *.swp
+*.tar
+*.tar.gz
 railway.toml
 codecov.yml
 CODE_OF_CONDUCT.md
