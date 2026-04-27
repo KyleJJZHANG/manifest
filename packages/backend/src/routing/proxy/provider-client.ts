@@ -37,8 +37,20 @@ const PROVIDER_TIMEOUT_MS = 180_000;
  * Endpoint keys (OpenAI-compatible format) whose streaming responses support
  * `stream_options.include_usage`. Token usage is needed for DB logging and for
  * downstream clients (e.g. OpenClaw context management).
+ *
+ * `'custom'` is included so user-defined OpenAI-compatible endpoints get usage
+ * data in stream responses — without it, every chunk's `usage` is `null` and
+ * tokens/cost are recorded as 0. The major OpenAI-compatible vendors users add
+ * here (Volcengine Ark, DeepSeek, MiniMax, SiliconFlow, etc.) all honor the
+ * field; the rare server that 400s on it can disable streaming usage upstream.
  */
-const SUPPORTS_USAGE_STREAM_OPTIONS = new Set(['openai', 'openrouter', 'ollama', 'ollama-cloud']);
+const SUPPORTS_USAGE_STREAM_OPTIONS = new Set([
+  'openai',
+  'openrouter',
+  'ollama',
+  'ollama-cloud',
+  'custom',
+]);
 
 /**
  * Strip vendor prefix from model name (e.g. "anthropic/claude-sonnet-4" → "claude-sonnet-4").

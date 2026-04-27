@@ -1739,6 +1739,58 @@ describe('ProviderClient', () => {
       expect(sentBody.stream_options).toEqual({ include_usage: true });
     });
 
+    it('injects stream_options.include_usage for custom endpoint streaming requests', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const customEndpoint = {
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+        buildHeaders: (key: string) => ({
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        }),
+        buildPath: () => '/chat/completions',
+        format: 'openai' as const,
+      };
+
+      await client.forward({
+        provider: 'custom:abc-123',
+        apiKey: 'sk-volc',
+        model: 'deepseek-v3.2',
+        body: { messages: [{ role: 'user', content: 'Hello' }] },
+        stream: true,
+        customEndpoint,
+      });
+
+      const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(sentBody.stream_options).toEqual({ include_usage: true });
+    });
+
+    it('does not inject stream_options for non-streaming custom endpoint requests', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const customEndpoint = {
+        baseUrl: 'http://localhost:8000',
+        buildHeaders: (key: string) => ({
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        }),
+        buildPath: () => '/v1/chat/completions',
+        format: 'openai' as const,
+      };
+
+      await client.forward({
+        provider: 'custom:uuid',
+        apiKey: '',
+        model: 'my-model',
+        body: { messages: [{ role: 'user', content: 'Hello' }] },
+        stream: false,
+        customEndpoint,
+      });
+
+      const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(sentBody.stream_options).toBeUndefined();
+    });
+
     it('does not inject stream_options for non-streaming OpenAI requests', async () => {
       mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
       await client.forward({
