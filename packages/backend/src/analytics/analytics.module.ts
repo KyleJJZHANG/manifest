@@ -18,12 +18,14 @@ import { MessageDetailsService } from './services/message-details.service';
 import { MessageFeedbackService } from './services/message-feedback.service';
 import { SpecificityFeedbackService } from './services/specificity-feedback.service';
 import { AgentAnalyticsService } from './services/agent-analytics.service';
+import { ReconciliationService } from './services/reconciliation.service';
 import { OverviewController } from './controllers/overview.controller';
 import { TokensController } from './controllers/tokens.controller';
 import { CostsController } from './controllers/costs.controller';
 import { MessagesController } from './controllers/messages.controller';
 import { AgentsController } from './controllers/agents.controller';
 import { AgentAnalyticsController } from './controllers/agent-analytics.controller';
+import { ReconciliationController } from './controllers/reconciliation.controller';
 
 @Module({
   imports: [
@@ -46,6 +48,7 @@ import { AgentAnalyticsController } from './controllers/agent-analytics.controll
     MessagesController,
     AgentsController,
     AgentAnalyticsController,
+    ReconciliationController,
   ],
   providers: [
     AggregationService,
@@ -57,6 +60,7 @@ import { AgentAnalyticsController } from './controllers/agent-analytics.controll
     MessageFeedbackService,
     SpecificityFeedbackService,
     AgentAnalyticsService,
+    ReconciliationService,
   ],
   exports: [SpecificityFeedbackService],
 })
