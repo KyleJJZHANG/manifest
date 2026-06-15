@@ -95,6 +95,16 @@ describe('proxy-response-handler', () => {
       expect(headers).not.toHaveProperty('X-Manifest-Fallback-Index');
     });
 
+    it('should include the auth-type header when set', () => {
+      const headers = buildMetaHeaders(makeMeta({ auth_type: 'subscription' }));
+      expect(headers['X-Manifest-Auth-Type']).toBe('subscription');
+    });
+
+    it('should omit the auth-type header when not set', () => {
+      const headers = buildMetaHeaders(makeMeta());
+      expect(headers).not.toHaveProperty('X-Manifest-Auth-Type');
+    });
+
     it('should include specificity header when specificity_category is set', () => {
       const meta = makeMeta({ specificity_category: 'coding' });
       const headers = buildMetaHeaders(meta);

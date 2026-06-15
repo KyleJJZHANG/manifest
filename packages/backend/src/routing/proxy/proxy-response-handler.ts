@@ -31,6 +31,11 @@ export function buildMetaHeaders(meta: RoutingMeta): Record<string, string> {
   if (meta.specificity_category) {
     headers['X-Manifest-Specificity'] = meta.specificity_category;
   }
+  if (meta.auth_type) {
+    // Lets the caller distinguish a subscription's zero marginal cost from
+    // a metered call — they look identical in the body otherwise.
+    headers['X-Manifest-Auth-Type'] = meta.auth_type;
+  }
   if (meta.fallbackFromModel) {
     headers['X-Manifest-Fallback-From'] = meta.fallbackFromModel;
     headers['X-Manifest-Fallback-Index'] = String(meta.fallbackIndex ?? 0);
