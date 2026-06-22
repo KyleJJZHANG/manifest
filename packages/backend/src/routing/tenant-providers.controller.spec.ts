@@ -39,6 +39,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -69,6 +70,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -89,6 +91,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -104,6 +107,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       customProviderService as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders({ tenantId: null, userId: 'user-1' });
@@ -141,6 +145,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -169,6 +174,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -187,6 +193,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -209,6 +216,7 @@ describe('TenantProvidersController', () => {
         ]),
       } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -229,6 +237,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       customProviderService as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -253,6 +262,7 @@ describe('TenantProvidersController', () => {
       providerRepo as never,
       { getAll: jest.fn().mockReturnValue([]) } as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
+      { deleteConnection: jest.fn() } as never,
     );
 
     const result = await controller.listProviders(ctx);
@@ -264,5 +274,37 @@ describe('TenantProvidersController', () => {
       result.providers.find((p: { provider: string }) => p.provider === 'custom:gone')!
         .display_name,
     ).toBeNull();
+  });
+
+  describe('deleteConnection', () => {
+    it('delegates to ProviderService and returns ok', async () => {
+      const providerService = { deleteConnection: jest.fn().mockResolvedValue(undefined) };
+      const controller = new TenantProvidersController(
+        { find: jest.fn() } as never,
+        { getAll: jest.fn().mockReturnValue([]) } as never,
+        { list: jest.fn().mockResolvedValue([]) } as never,
+        providerService as never,
+      );
+
+      const result = await controller.deleteConnection(ctx, 'conn-123');
+
+      expect(providerService.deleteConnection).toHaveBeenCalledWith('tenant-1', 'conn-123');
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('throws NotFound when there is no tenant context', async () => {
+      const providerService = { deleteConnection: jest.fn() };
+      const controller = new TenantProvidersController(
+        { find: jest.fn() } as never,
+        { getAll: jest.fn().mockReturnValue([]) } as never,
+        { list: jest.fn().mockResolvedValue([]) } as never,
+        providerService as never,
+      );
+
+      await expect(
+        controller.deleteConnection({ tenantId: null, userId: null }, 'conn-123'),
+      ).rejects.toThrow('Connection not found');
+      expect(providerService.deleteConnection).not.toHaveBeenCalled();
+    });
   });
 });

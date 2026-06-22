@@ -35,6 +35,7 @@ import {
   disconnectProvider,
   refreshModels,
 } from '../../services/api/routing.js';
+import { deleteConnection } from '../../services/api/providers.js';
 import ProviderChartCard from '../../components/ProviderChartCard.jsx';
 import { AGENT_COLORS } from '../../components/MultiAgentTokenChart.jsx';
 import Select from '../../components/Select.jsx';
@@ -366,6 +367,7 @@ const ConnectionDetail: Component = () => {
   const [renaming, setRenaming] = createSignal(false);
   const [renameError, setRenameError] = createSignal('');
   const [refreshingModels, setRefreshingModels] = createSignal(false);
+  const [removing, setRemoving] = createSignal(false);
   const [agents] = createResource(async () => {
     try {
       const res = await getAgents();
@@ -427,6 +429,23 @@ const ConnectionDetail: Component = () => {
       navigate(backLink());
     } catch (e: any) {
       toast.error(e?.message ?? 'Failed to disconnect');
+    }
+  };
+
+  // Hard-delete this connection row by its tenant_providers id. Unlike soft
+  // disconnect, this needs no agent/harness and clears a disconnected/inactive
+  // connection from the list for good. Only reachable from the manage modal,
+  // which renders solely once the connection has resolved.
+  const handleRemove = async () => {
+    setRemoving(true);
+    try {
+      await deleteConnection(params.connectionId);
+      toast.success('Connection removed');
+      navigate(backLink());
+    } catch (e: any) {
+      toast.error(e?.message ?? 'Failed to remove connection');
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -985,7 +1004,14 @@ const ConnectionDetail: Component = () => {
                         </Show>
 
                         <Show when={!c.is_active}>
-                          <div style="display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid hsl(var(--border));">
+                          <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 12px; border-top: 1px solid hsl(var(--border));">
+                            <button
+                              class="btn btn--destructive btn--sm"
+                              disabled={removing()}
+                              onClick={handleRemove}
+                            >
+                              {removing() ? 'Removing…' : 'Remove permanently'}
+                            </button>
                             <button
                               class="btn btn--outline btn--sm"
                               onClick={() => setShowManageModal(false)}

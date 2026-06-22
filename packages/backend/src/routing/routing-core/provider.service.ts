@@ -756,6 +756,32 @@ export class ProviderService {
     return { notifications: [] };
   }
 
+  /**
+   * Permanently delete a single tenant-level connection row by id.
+   *
+   * Unlike removeProvider() (a SOFT disconnect: is_active=false, row kept so it
+   * can be reconnected and historical per-connection attribution survives),
+   * this HARD-deletes the row so it disappears from the connections list. The
+   * agent_messages.tenant_provider_id FK is ON DELETE SET NULL, so past usage
+   * rows keep their provider/auth_type/cost_usd/model columns and only lose the
+   * per-connection drill-down link. Blocked while a route still pins the
+   * connection (same guard as disconnect) so we never orphan a routing target.
+   */
+  async deleteConnection(tenantId: string, connectionId: string): Promise<void> {
+    const repo = this.tenantProviderRepo();
+    const row = await repo.findOne({ where: { id: connectionId, tenant_id: tenantId } });
+    if (!row) throw new NotFoundException('Connection not found');
+
+    await this.assertProviderRoutesNotUsed(tenantId, [row]);
+    await this.deleteProviderAccess([row.id]);
+    await repo.delete({ id: row.id, tenant_id: tenantId });
+
+    for (const agentId of await this.listOwnedAgentIds(tenantId)) {
+      this.routingCache.invalidateAgent(agentId);
+    }
+    this.routingCache.invalidateTenant(tenantId);
+  }
+
   /** Resolve the ids of every non-deleted agent the tenant owns. */
   async listOwnedAgentIds(tenantId: string): Promise<string[]> {
     return (await this.listOwnedAgentRouteTargets(tenantId)).map((agent) => agent.id);

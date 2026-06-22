@@ -1,5 +1,5 @@
 import type { AuthType } from 'manifest-shared';
-import { fetchJson } from './core.js';
+import { fetchJson, fetchMutate } from './core.js';
 
 export interface TenantProviderConnection {
   id: string;
@@ -67,6 +67,18 @@ export function getProviders() {
 /** Fetch provider USAGE stats (the expensive 30d aggregation). */
 export function getProviderUsage() {
   return fetchJson<ProviderUsageResponse>('/providers/usage');
+}
+
+/**
+ * Permanently delete one tenant-level connection by its tenant_providers id.
+ * Unlike the agent-scoped soft disconnect, this hard-deletes the row so a
+ * disconnected/inactive connection is cleared from the list (past usage rows
+ * keep their data via the ON DELETE SET NULL FK).
+ */
+export function deleteConnection(connectionId: string) {
+  return fetchMutate<{ ok: true }>(`/providers/connections/${encodeURIComponent(connectionId)}`, {
+    method: 'DELETE',
+  });
 }
 
 const USAGE_ZERO: Omit<TenantProviderUsage, 'provider' | 'auth_type'> = {

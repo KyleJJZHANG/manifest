@@ -1030,6 +1030,70 @@ describe('ConnectionDetail (analytics)', () => {
     expect(screen.getByText(/Subscriptions/)).toBeDefined();
   });
 
+  const inactiveCustomDetail = {
+    connection: {
+      id: 'conn-custom',
+      provider: 'custom:cp-1',
+      auth_type: 'subscription',
+      label: 'Custom',
+      cached_model_count: 0,
+      key_prefix: null,
+      connected_at: '2026-06-04T09:00:00Z',
+      is_active: false,
+      last_used_at: null,
+    },
+    agents: [],
+    model_usage: [],
+    recent_messages: [],
+  };
+
+  const setupInactiveCustom = () => {
+    routerState.params = { connectionId: 'conn-custom' };
+    apiMocks.getConnectionDetail.mockResolvedValue(inactiveCustomDetail);
+    apiMocks.getProviderAnalytics.mockResolvedValue({
+      summary: { messages: { value: 0, trend_pct: 0 }, tokens: { value: 0, trend_pct: 0 } },
+      token_usage: [],
+      message_usage: [],
+    });
+    apiMocks.getPerAgentTimeseries.mockResolvedValue({ agents: [], timeseries: [] });
+    apiMocks.getPerAgentMessageTimeseries.mockResolvedValue({ agents: [], timeseries: [] });
+    apiMocks.getPerAgentCostTimeseries.mockResolvedValue({ agents: [], timeseries: [] });
+  };
+
+  it('permanently removes an inactive connection from the manage modal', async () => {
+    setupInactiveCustom();
+    apiMocks.fetchMutate.mockResolvedValue({ ok: true });
+
+    render(() => <ConnectionDetail />);
+    await waitFor(() => expect(screen.getByText('Inactive')).toBeDefined());
+
+    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByText('Remove permanently'));
+
+    await waitFor(() =>
+      expect(apiMocks.fetchMutate).toHaveBeenCalledWith(
+        expect.stringContaining('/providers/connections/conn-custom'),
+        expect.objectContaining({ method: 'DELETE' }),
+      ),
+    );
+    await waitFor(() => expect(routerState.navigate).toHaveBeenCalled());
+    expect(toastMock.success).toHaveBeenCalledWith('Connection removed');
+  });
+
+  it('surfaces an error and stays put when permanent removal fails', async () => {
+    setupInactiveCustom();
+    apiMocks.fetchMutate.mockRejectedValue(new Error('remove boom'));
+
+    render(() => <ConnectionDetail />);
+    await waitFor(() => expect(screen.getByText('Inactive')).toBeDefined());
+
+    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByText('Remove permanently'));
+
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('remove boom'));
+    expect(routerState.navigate).not.toHaveBeenCalled();
+  });
+
   it('shows a loading state until the connection detail resolves', async () => {
     let resolveDetail!: (value: unknown) => void;
     apiMocks.getConnectionDetail.mockReturnValue(

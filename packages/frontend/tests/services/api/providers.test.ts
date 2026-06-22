@@ -3,6 +3,7 @@ import * as api from '../../../src/services/api';
 import {
   getProviders,
   getProviderUsage,
+  deleteConnection,
   mergeUsage,
   type TenantProviderConfig,
   type TenantProviderUsage,
@@ -70,6 +71,16 @@ describe('providers API client', () => {
     await expect(getProviderUsage()).resolves.toEqual(response);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain('/api/v1/providers/usage');
+    expect((init as RequestInit).credentials).toBe('include');
+  });
+
+  it('DELETEs a connection by its tenant_providers id', async () => {
+    const fetchMock = setupFetch({ ok: true });
+
+    await expect(deleteConnection('conn-123')).resolves.toEqual({ ok: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/api/v1/providers/connections/conn-123');
+    expect((init as RequestInit).method).toBe('DELETE');
     expect((init as RequestInit).credentials).toBe('include');
   });
 

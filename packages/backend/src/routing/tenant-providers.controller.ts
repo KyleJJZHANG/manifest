@@ -1,10 +1,11 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Delete, Get, NotFoundException, Param } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TenantCtx, TenantContext } from '../common/decorators/tenant-context.decorator';
 import { TenantProvider } from '../entities/tenant-provider.entity';
 import { ModelPricingCacheService } from '../model-prices/model-pricing-cache.service';
 import { CustomProviderService } from './custom-provider/custom-provider.service';
+import { ProviderService } from './routing-core/provider.service';
 
 /**
  * Tenant-level provider management endpoints.
@@ -25,7 +26,26 @@ export class TenantProvidersController {
     private readonly providerRepo: Repository<TenantProvider>,
     private readonly pricingCache: ModelPricingCacheService,
     private readonly customProviderService: CustomProviderService,
+    private readonly providerService: ProviderService,
   ) {}
+
+  /**
+   * Permanently delete one tenant-level connection by its tenant_providers id.
+   * Distinct from the agent-scoped soft disconnect (DELETE
+   * /routing/:agent/providers/:provider): this hard-deletes the row so a
+   * disconnected/inactive connection can be cleared from the list. Past usage
+   * survives (agent_messages FK is ON DELETE SET NULL); blocked while a route
+   * still pins the connection.
+   */
+  @Delete('connections/:connectionId')
+  async deleteConnection(
+    @TenantCtx() ctx: TenantContext,
+    @Param('connectionId') connectionId: string,
+  ): Promise<{ ok: true }> {
+    if (!ctx.tenantId) throw new NotFoundException('Connection not found');
+    await this.providerService.deleteConnection(ctx.tenantId, connectionId);
+    return { ok: true };
+  }
 
   /**
    * List all tenant-level providers (config only). Groups by

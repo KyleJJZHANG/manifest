@@ -1372,6 +1372,38 @@ describe('ProviderService — route-only cleanup paths', () => {
       expect(label).toBe('Key 3');
     });
   });
+
+  describe('deleteConnection', () => {
+    const connRow = {
+      id: 'conn-1',
+      tenant_id: 'tenant-1',
+      provider: 'kiro',
+      auth_type: 'subscription',
+      label: 'Default',
+      priority: 0,
+      is_active: false,
+    } as unknown as TenantProvider;
+
+    it('hard-deletes the row and invalidates caches when no route pins it', async () => {
+      providerRepo.findOne.mockResolvedValueOnce(connRow);
+      // tier/spec/headerTier repos default to [] → no route references → guard passes.
+
+      await svc.deleteConnection('tenant-1', 'conn-1');
+
+      expect(providerRepo.delete).toHaveBeenCalledWith({ id: 'conn-1', tenant_id: 'tenant-1' });
+      expect(routingCache.invalidateAgent).toHaveBeenCalledWith('agent-1');
+      expect(routingCache.invalidateTenant).toHaveBeenCalledWith('tenant-1');
+    });
+
+    it('throws NotFound and deletes nothing when the connection is missing', async () => {
+      providerRepo.findOne.mockResolvedValueOnce(null);
+
+      await expect(svc.deleteConnection('tenant-1', 'missing')).rejects.toThrow(
+        'Connection not found',
+      );
+      expect(providerRepo.delete).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('ProviderService — symmetric provider↔agent auto-connect', () => {
