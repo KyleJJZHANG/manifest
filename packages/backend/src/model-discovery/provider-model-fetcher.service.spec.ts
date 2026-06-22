@@ -919,15 +919,22 @@ describe('ProviderModelFetcherService', () => {
     ]);
   });
 
-  it('should return [] when Kiro model discovery rejects the API key', async () => {
+  it('should return [] and log the AWS error body when Kiro model discovery is rejected', async () => {
     fetchSpy.mockResolvedValue({
       ok: false,
       status: 403,
+      text: async () => '{"__type":"AccessDeniedException","message":"not entitled"}',
     });
+    const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
 
     const result = await service.fetch('kiro', 'ksk_bad', 'subscription');
 
     expect(result).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Provider kiro returned 403'),
+    );
+    expect(warnSpy.mock.calls[0][0]).toContain('AccessDeniedException');
+    warnSpy.mockRestore();
   });
 
   it('should clear the Kiro model discovery timeout when fetch rejects', async () => {

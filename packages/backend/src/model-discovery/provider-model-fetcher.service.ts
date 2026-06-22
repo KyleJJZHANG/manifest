@@ -917,7 +917,13 @@ export class ProviderModelFetcherService {
         }
 
         if (!res.ok) {
-          this.logger.warn(`Provider kiro returned ${res.status} from ${KIRO_BASE_URL}`);
+          // Surface the AWS error envelope (e.g. ValidationException /
+          // AccessDeniedException + message) instead of swallowing it — a
+          // non-2xx here silently collapses Kiro to its curated fallback list.
+          const errorBody = await res.text();
+          this.logger.warn(
+            `Provider kiro returned ${res.status} from ${KIRO_BASE_URL}: ${errorBody.slice(0, 500)}`,
+          );
           return [];
         }
 
@@ -934,7 +940,13 @@ export class ProviderModelFetcherService {
         if (!nextToken) break;
       }
 
-      return filterNonChatModels(models, 'kiro');
+      const chatModels = filterNonChatModels(models, 'kiro');
+      // Distinguish "API returned nothing" from "everything got filtered out"
+      // so an empty result isn't mistaken for a request/auth failure.
+      this.logger.log(
+        `kiro ListAvailableModels returned ${models.length} model(s), ${chatModels.length} after chat filter`,
+      );
+      return chatModels;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Failed to fetch models from kiro: ${message}`);
