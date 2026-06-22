@@ -10,7 +10,6 @@ function makeContext(headers: Record<string, string | undefined>): ExecutionCont
       getRequest: () => ({
         headers,
         ip: '127.0.0.1',
-        apiKeyUserId: undefined,
       }),
     }),
     getHandler: () => ({}),
@@ -69,7 +68,8 @@ describe('ApiKeyGuard', () => {
     mockFind.mockResolvedValueOnce([
       {
         id: 'key-1',
-        user_id: 'user-123',
+        tenant_id: 'tenant-123',
+        created_by_user_id: 'user-123',
         key_hash: storedHash,
         key_prefix: rawKey.substring(0, 12),
       },
@@ -81,13 +81,14 @@ describe('ApiKeyGuard', () => {
     expect(mockExecute).toHaveBeenCalled();
   });
 
-  it('sets apiKeyUserId on request when DB key matches', async () => {
+  it('sets tenantContext (and user attribution) on request when DB key matches', async () => {
     const rawKey = 'db-key';
     const storedHash = hashKey(rawKey);
     mockFind.mockResolvedValueOnce([
       {
         id: 'key-1',
-        user_id: 'user-456',
+        tenant_id: 'tenant-456',
+        created_by_user_id: 'user-456',
         key_hash: storedHash,
         key_prefix: rawKey.substring(0, 12),
       },
@@ -95,7 +96,12 @@ describe('ApiKeyGuard', () => {
     const request = {
       headers: { 'x-api-key': rawKey },
       ip: '127.0.0.1',
-      apiKeyUserId: undefined as string | undefined,
+    } as {
+      headers: Record<string, string>;
+      ip: string;
+      tenantContext?: { tenantId: string; userId: string | null };
+      user?: { id: string };
+      authMethod?: string;
     };
     const ctx = {
       switchToHttp: () => ({ getRequest: () => request }),
@@ -104,16 +110,73 @@ describe('ApiKeyGuard', () => {
     } as unknown as ExecutionContext;
 
     await guard.canActivate(ctx);
-    expect(request.apiKeyUserId).toBe('user-456');
+    // The tenant comes straight off the key row — no key→user→tenant indirection.
+    expect(request.tenantContext).toEqual({ tenantId: 'tenant-456', userId: 'user-456' });
+    // Creating user is kept as attribution so @CurrentUser controllers see a user.
+    expect(request.user).toEqual({ id: 'user-456' });
+    expect(request.authMethod).toBe('api_key');
+  });
+
+  it('sets tenantContext but does not synthesize request.user when created_by_user_id is null', async () => {
+    const rawKey = 'orphan-key';
+    const storedHash = hashKey(rawKey);
+    mockFind.mockResolvedValueOnce([
+      {
+        id: 'key-2',
+        tenant_id: 'tenant-789',
+        created_by_user_id: null,
+        key_hash: storedHash,
+        key_prefix: rawKey.substring(0, 12),
+      },
+    ]);
+    const request = {
+      headers: { 'x-api-key': rawKey },
+      ip: '127.0.0.1',
+    } as {
+      headers: Record<string, string>;
+      ip: string;
+      tenantContext?: { tenantId: string; userId: string | null };
+      user?: { id: string };
+      authMethod?: string;
+    };
+    const ctx = {
+      switchToHttp: () => ({ getRequest: () => request }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+
+    await guard.canActivate(ctx);
+    expect(request.tenantContext).toEqual({ tenantId: 'tenant-789', userId: null });
+    // No owning user → no synthesized request.user (env-key-style attribution).
+    expect(request.user).toBeUndefined();
+    expect(request.authMethod).toBe('api_key');
   });
 
   it('falls back to env-based API key when DB lookup returns empty', async () => {
     mockFind.mockResolvedValueOnce([]);
     configGet.mockReturnValue('env-api-key');
-    const ctx = makeContext({ 'x-api-key': 'env-api-key' });
+    const request = {
+      headers: { 'x-api-key': 'env-api-key' },
+      ip: '127.0.0.1',
+    } as {
+      headers: Record<string, string>;
+      ip: string;
+      tenantContext?: unknown;
+      user?: unknown;
+      authMethod?: string;
+    };
+    const ctx = {
+      switchToHttp: () => ({ getRequest: () => request }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
 
     const result = await guard.canActivate(ctx);
     expect(result).toBe(true);
+    // Env key is a shared operator credential — no tenant context, no user.
+    expect(request.authMethod).toBe('env_api_key');
+    expect(request.tenantContext).toBeUndefined();
+    expect(request.user).toBeUndefined();
   });
 
   it('throws when neither DB nor env key matches', async () => {
@@ -147,7 +210,8 @@ describe('ApiKeyGuard', () => {
     mockFind.mockResolvedValueOnce([
       {
         id: 'key-1',
-        user_id: 'user-789',
+        tenant_id: 'tenant-789',
+        created_by_user_id: 'user-789',
         key_hash: storedHash,
         key_prefix: rawKey.substring(0, 12),
       },
@@ -201,5 +265,64 @@ describe('ApiKeyGuard', () => {
     } as unknown as ExecutionContext;
 
     await expect(guard.canActivate(ctx)).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('rejects x-api-key header when provided as an array', async () => {
+    // Express returns an array when multiple values are supplied for the
+    // same header (e.g. duplicate `X-API-Key: ...` lines). `typeof` an
+    // array is 'object', so the guard's `typeof apiKey !== 'string'` check
+    // must reject this case rather than coerce / pick a value silently.
+    const ctx = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          headers: { 'x-api-key': ['key1', 'key2'] },
+          ip: '127.0.0.1',
+        }),
+      }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+
+    await expect(guard.canActivate(ctx)).rejects.toThrow(UnauthorizedException);
+    await expect(guard.canActivate(ctx)).rejects.toThrow('X-API-Key header required');
+    expect(mockFind).not.toHaveBeenCalled();
+  });
+
+  it('rejects x-api-key header when provided as a single-element array', async () => {
+    // Even when only one value is present, an array shape must not pass —
+    // otherwise downstream `apiKey.substring(...)` / hash lookups would
+    // explode at runtime on `array.substring is not a function`.
+    const ctx = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          headers: { 'x-api-key': ['only-key'] },
+          ip: '127.0.0.1',
+        }),
+      }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+
+    await expect(guard.canActivate(ctx)).rejects.toThrow(UnauthorizedException);
+    await expect(guard.canActivate(ctx)).rejects.toThrow('X-API-Key header required');
+    expect(mockFind).not.toHaveBeenCalled();
+  });
+
+  it('rejects x-api-key header when provided as an empty array', async () => {
+    // Falsy short-circuit (`!apiKey`) handles `[]` because empty arrays
+    // are truthy in JS — the explicit type guard is what catches this.
+    const ctx = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          headers: { 'x-api-key': [] as string[] },
+          ip: '127.0.0.1',
+        }),
+      }),
+      getHandler: () => ({}),
+      getClass: () => ({}),
+    } as unknown as ExecutionContext;
+
+    await expect(guard.canActivate(ctx)).rejects.toThrow(UnauthorizedException);
+    expect(mockFind).not.toHaveBeenCalled();
   });
 });

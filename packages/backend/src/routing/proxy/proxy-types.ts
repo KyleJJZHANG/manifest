@@ -17,6 +17,15 @@ export type SignatureLookup = (toolCallId: string) => string | null;
  */
 export type ThinkingBlockLookup = (firstToolUseId: string) => ThinkingBlock[] | null;
 
+/**
+ * Optional lookup to re-inject cached reasoning_content strings that were
+ * stripped by OpenAI-compatible clients. Called with the first tool_call id
+ * from the assistant turn; returns the cached reasoning_content or null.
+ */
+export type ReasoningContentLookup = (firstToolCallId: string) => string | null;
+
+export type ProxyApiMode = 'chat_completions' | 'responses' | 'messages';
+
 export interface OpenAIMessage {
   role: string;
   content?: unknown;
@@ -35,6 +44,8 @@ export interface ForwardOptions {
   apiKey: string;
   model: string;
   body: Record<string, unknown>;
+  chatBody?: Record<string, unknown>;
+  apiMode?: ProxyApiMode;
   stream: boolean;
   signal?: AbortSignal;
   extraHeaders?: Record<string, string>;
@@ -44,15 +55,32 @@ export interface ForwardOptions {
   signatureLookup?: SignatureLookup;
   /** Lookup for re-injecting cached thinking blocks (Anthropic only). */
   thinkingLookup?: ThinkingBlockLookup;
+  /** Lookup for re-injecting cached reasoning_content (DeepSeek-compatible providers). */
+  reasoningContentLookup?: ReasoningContentLookup;
+  /**
+   * Provider-specific routing field carried in the OAuth token blob's `u`
+   * slot. For Gemini OAuth this is the CodeAssist
+   * `cloudaicompanionProject` id assigned during `enrichBlob`.
+   */
+  providerResource?: string;
 }
 
 /** Options for ProxyService.proxyRequest. */
 export interface ProxyRequestOptions {
   agentId: string;
-  userId: string;
+  /** Tenant that owns the agent — the scoping key for every provider/key/limit lookup. */
+  tenantId: string;
+  /**
+   * Owning user, when one exists. Informational attribution for the message
+   * recorder (`agent_messages.user_id`) only — never used for scoping,
+   * keying, or rate limiting.
+   */
+  userId: string | null;
   body: Record<string, unknown>;
+  /** Body used for Manifest-owned routing/scoring/recording; large inline media may be redacted. */
+  routingBody?: Record<string, unknown>;
+  apiMode?: ProxyApiMode;
   sessionKey: string;
-  tenantId?: string;
   agentName?: string;
   signal?: AbortSignal;
   specificityOverride?: string;

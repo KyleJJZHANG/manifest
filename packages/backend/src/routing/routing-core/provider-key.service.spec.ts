@@ -1,588 +1,280 @@
-import { ProviderKeyService } from './provider-key.service';
-import { RoutingCacheService } from './routing-cache.service';
-import { ProviderService } from './provider.service';
-import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
-import { ModelDiscoveryService } from '../../model-discovery/model-discovery.service';
-import { UserProvider } from '../../entities/user-provider.entity';
-import { TierAssignment } from '../../entities/tier-assignment.entity';
+import { ProviderKeyService, SYNTHETIC_OLLAMA_PROVIDER_ID } from './provider-key.service';
+import type { CachedProviderKey } from './routing-cache.service';
+import type { Repository } from 'typeorm';
+import { encrypt } from '../../common/utils/crypto.util';
+import type { TenantProvider } from '../../entities/tenant-provider.entity';
+import type { AgentEnabledProvider } from '../../entities/agent-enabled-provider.entity';
 
-jest.mock('../../common/utils/crypto.util', () => ({
-  decrypt: jest.fn().mockReturnValue('decrypted-key-value'),
-  getEncryptionSecret: jest.fn().mockReturnValue('test-secret'),
-}));
+// getEncryptionSecret() falls back to BETTER_AUTH_SECRET; set it so the
+// per-agent filter tests can produce real ciphertext that decryptOne resolves.
+process.env['BETTER_AUTH_SECRET'] = 'a'.repeat(64);
 
-jest.mock('../../common/utils/subscription-support', () => ({
-  isManifestUsableProvider: jest.fn(() => true),
-}));
-
-import { decrypt } from '../../common/utils/crypto.util';
-const mockDecrypt = decrypt as jest.MockedFunction<typeof decrypt>;
-
-function makeMockRepo() {
-  return {
-    find: jest.fn().mockResolvedValue([]),
-    findOne: jest.fn().mockResolvedValue(null),
-  };
-}
-
-function makeProvider(overrides: Partial<UserProvider> = {}): UserProvider {
-  return Object.assign(new UserProvider(), {
-    id: 'prov-1',
-    user_id: 'user-1',
-    agent_id: 'agent-1',
-    provider: 'openai',
-    auth_type: 'api_key' as const,
-    api_key_encrypted: 'encrypted-data',
-    key_prefix: 'sk-proj-',
-    is_active: true,
-    connected_at: '2025-01-01T00:00:00Z',
-    updated_at: '2025-01-01T00:00:00Z',
-    cached_models: null,
-    models_fetched_at: null,
-    ...overrides,
-  });
-}
-
-describe('ProviderKeyService', () => {
-  let service: ProviderKeyService;
-  let providerRepo: ReturnType<typeof makeMockRepo>;
-  let pricingCache: { getByModel: jest.Mock };
-  let discoveryService: { getModelForAgent: jest.Mock };
-  let routingCache: {
-    getApiKey: jest.Mock;
-    setApiKey: jest.Mock;
-    getProviders: jest.Mock;
-    setProviders: jest.Mock;
-  };
-  let providerService: { getProviders: jest.Mock };
+/**
+ * Focused unit coverage for the key-selection projections. The proxy specs
+ * mock ProviderKeyService wholesale, so these are the only place the real
+ * selectProviderKey / getProviderKeyId / wrapper bodies run. getProviderKeys is
+ * spied so the selection logic is exercised without the DB/decryption path.
+ */
+describe('ProviderKeyService — selection projections', () => {
+  let svc: ProviderKeyService;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockDecrypt.mockReturnValue('decrypted-key-value');
-    providerRepo = makeMockRepo();
-    pricingCache = { getByModel: jest.fn().mockReturnValue(undefined) };
-    discoveryService = { getModelForAgent: jest.fn().mockResolvedValue(null) };
-    routingCache = {
-      getApiKey: jest.fn().mockReturnValue(undefined),
-      setApiKey: jest.fn(),
-      getProviders: jest.fn().mockReturnValue(null),
-      setProviders: jest.fn(),
-    };
-    providerService = { getProviders: jest.fn().mockResolvedValue([]) };
-
-    service = new ProviderKeyService(
-      providerRepo as unknown as any,
-      pricingCache as unknown as ModelPricingCacheService,
-      discoveryService as unknown as ModelDiscoveryService,
-      routingCache as unknown as RoutingCacheService,
-      providerService as unknown as ProviderService,
+    svc = new ProviderKeyService(
+      {} as never, // providerRepo
+      {} as never, // pricingCache
+      {} as never, // discoveryService
+      {} as never, // routingCache
+      {} as never, // providerService
+      null, // accessRepo (optional)
     );
   });
 
-  /* ── getProviderApiKey ── */
+  const key = (over: Partial<CachedProviderKey>): CachedProviderKey => ({
+    id: 'up-1',
+    label: 'Default',
+    priority: 0,
+    apiKey: 'sk',
+    region: null,
+    ...over,
+  });
 
-  describe('getProviderApiKey', () => {
-    it('should return empty string for ollama provider', async () => {
-      const result = await service.getProviderApiKey('agent-1', 'Ollama');
-
-      expect(result).toBe('');
-      expect(routingCache.getApiKey).not.toHaveBeenCalled();
+  describe('selectProviderKey', () => {
+    it('returns null when no keys resolve', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([]);
+      expect(await svc.selectProviderKey('u', 'openai', 'api_key')).toBeNull();
     });
 
-    it('should return cached key when available', async () => {
-      routingCache.getApiKey.mockReturnValue('cached-key');
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBe('cached-key');
-      expect(providerRepo.find).not.toHaveBeenCalled();
+    it('matches the requested label case-insensitively', async () => {
+      jest
+        .spyOn(svc, 'getProviderKeys')
+        .mockResolvedValue([
+          key({ id: 'up-default', label: 'Default' }),
+          key({ id: 'up-work', label: 'Work' }),
+        ]);
+      const sel = await svc.selectProviderKey('u', 'openai', 'api_key', 'work');
+      expect(sel?.id).toBe('up-work');
     });
 
-    it('should resolve and cache key from DB', async () => {
-      providerRepo.find.mockResolvedValue([makeProvider()]);
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBe('decrypted-key-value');
-      expect(routingCache.setApiKey).toHaveBeenCalledWith(
-        'agent-1',
-        'openai',
-        'decrypted-key-value',
-        undefined,
-      );
+    it('falls back to the first key when the label does not match', async () => {
+      jest
+        .spyOn(svc, 'getProviderKeys')
+        .mockResolvedValue([key({ id: 'up-default', label: 'Default' })]);
+      const sel = await svc.selectProviderKey('u', 'openai', 'api_key', 'nonexistent');
+      expect(sel?.id).toBe('up-default');
     });
 
-    it('should pass authType to cache and resolver', async () => {
-      providerRepo.find.mockResolvedValue([
-        makeProvider({ auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-      ]);
-
-      await service.getProviderApiKey('agent-1', 'openai', 'subscription');
-
-      expect(routingCache.getApiKey).toHaveBeenCalledWith('agent-1', 'openai', 'subscription');
-      expect(routingCache.setApiKey).toHaveBeenCalledWith(
-        'agent-1',
-        'openai',
-        'decrypted-key-value',
-        'subscription',
-      );
-    });
-
-    it('should return null when no matching provider found', async () => {
-      providerRepo.find.mockResolvedValue([]);
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBeNull();
+    it('returns the first key when no label is given', async () => {
+      jest
+        .spyOn(svc, 'getProviderKeys')
+        .mockResolvedValue([key({ id: 'up-default' }), key({ id: 'up-2', label: 'Two' })]);
+      const sel = await svc.selectProviderKey('u', 'openai', 'api_key');
+      expect(sel?.id).toBe('up-default');
     });
   });
 
-  /* ── resolveProviderApiKey (private, via getProviderApiKey) ── */
-
-  describe('resolveProviderApiKey for custom: providers', () => {
-    it('should handle custom provider with encrypted key', async () => {
-      providerRepo.findOne.mockResolvedValue(
-        makeProvider({ provider: 'custom:cp-123', api_key_encrypted: 'enc-custom' }),
-      );
-
-      const result = await service.getProviderApiKey('agent-1', 'custom:cp-123');
-
-      expect(result).toBe('decrypted-key-value');
+  describe('getProviderKeyId', () => {
+    it('returns the selected key id', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([key({ id: 'up-7' })]);
+      expect(await svc.getProviderKeyId('u', 'openai', 'api_key')).toBe('up-7');
     });
 
-    it('should return empty string for custom provider without key', async () => {
-      providerRepo.findOne.mockResolvedValue(
-        makeProvider({ provider: 'custom:cp-123', api_key_encrypted: null }),
-      );
-
-      const result = await service.getProviderApiKey('agent-1', 'custom:cp-123');
-
-      expect(result).toBe('');
+    it('returns null for the synthetic Ollama key (no persisted row → would break the FK)', async () => {
+      jest
+        .spyOn(svc, 'getProviderKeys')
+        .mockResolvedValue([key({ id: SYNTHETIC_OLLAMA_PROVIDER_ID, apiKey: '' })]);
+      expect(await svc.getProviderKeyId('u', 'ollama', 'local')).toBeNull();
     });
 
-    it('should return null for non-existent custom provider', async () => {
-      providerRepo.findOne.mockResolvedValue(null);
-
-      const result = await service.getProviderApiKey('agent-1', 'custom:cp-missing');
-
-      expect(result).toBeNull();
-    });
-
-    it('should return null when custom provider decrypt fails', async () => {
-      mockDecrypt.mockImplementationOnce(() => {
-        throw new Error('decrypt failed');
-      });
-      providerRepo.findOne.mockResolvedValue(
-        makeProvider({ provider: 'custom:cp-123', api_key_encrypted: 'bad-enc' }),
-      );
-
-      const result = await service.getProviderApiKey('agent-1', 'custom:cp-123');
-
-      expect(result).toBeNull();
+    it('returns null when no key resolves', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([]);
+      expect(await svc.getProviderKeyId('u', 'openai', 'api_key')).toBeNull();
     });
   });
 
-  describe('resolveProviderApiKey with preferredAuthType', () => {
-    it('should only consider matching auth type when specified', async () => {
-      const apiKeyProvider = makeProvider({
-        id: 'p1',
-        auth_type: 'api_key',
-        api_key_encrypted: 'enc-apikey',
-      });
-      const subProvider = makeProvider({
-        id: 'p2',
-        auth_type: 'subscription',
-        api_key_encrypted: 'enc-sub',
-      });
-      providerRepo.find.mockResolvedValue([apiKeyProvider, subProvider]);
-
-      mockDecrypt.mockImplementation((enc: string) => {
-        if (enc === 'enc-sub') return 'sub-decrypted';
-        return 'apikey-decrypted';
-      });
-
-      const result = await service.getProviderApiKey('agent-1', 'openai', 'subscription');
-
-      expect(result).toBe('sub-decrypted');
+  describe('getProviderApiKey / getProviderRegion projections', () => {
+    it('getProviderApiKey returns the selected key apiKey', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([key({ apiKey: 'sk-x' })]);
+      expect(await svc.getProviderApiKey('u', 'openai', 'api_key')).toBe('sk-x');
     });
 
-    it('should prefer api_key auth type when no preference specified', async () => {
-      const subProvider = makeProvider({
-        id: 'p2',
-        auth_type: 'subscription',
-        api_key_encrypted: 'enc-sub',
-      });
-      const apiKeyProvider = makeProvider({
-        id: 'p1',
-        auth_type: 'api_key',
-        api_key_encrypted: 'enc-apikey',
-      });
-      providerRepo.find.mockResolvedValue([subProvider, apiKeyProvider]);
-
-      mockDecrypt.mockImplementation((enc: string) => {
-        if (enc === 'enc-apikey') return 'apikey-decrypted';
-        return 'sub-decrypted';
-      });
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBe('apikey-decrypted');
+    it('getProviderApiKey returns null when no key resolves', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([]);
+      expect(await svc.getProviderApiKey('u', 'openai', 'api_key')).toBeNull();
     });
 
-    it('should return null when decrypt fails for all candidates and log warning', async () => {
-      providerRepo.find.mockResolvedValue([makeProvider({ api_key_encrypted: 'bad-enc' })]);
-      mockDecrypt.mockImplementation(() => {
-        throw new Error('bad key');
-      });
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBeNull();
+    it('getProviderRegion returns the selected key region', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([key({ region: 'eu-west' })]);
+      expect(await svc.getProviderRegion('u', 'openai', 'api_key')).toBe('eu-west');
     });
 
-    it('should skip candidates without encrypted key', async () => {
-      const noKey = makeProvider({ id: 'p1', api_key_encrypted: null });
-      const withKey = makeProvider({ id: 'p2', api_key_encrypted: 'enc-valid' });
-      providerRepo.find.mockResolvedValue([noKey, withKey]);
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBe('decrypted-key-value');
-    });
-
-    it('should log subscription label when subscription decrypt fails', async () => {
-      providerRepo.find.mockResolvedValue([
-        makeProvider({ auth_type: 'subscription', api_key_encrypted: 'bad' }),
-      ]);
-      mockDecrypt.mockImplementation(() => {
-        throw new Error('bad');
-      });
-
-      const result = await service.getProviderApiKey('agent-1', 'openai');
-
-      expect(result).toBeNull();
+    it('getProviderRegion returns null when no key resolves', async () => {
+      jest.spyOn(svc, 'getProviderKeys').mockResolvedValue([]);
+      expect(await svc.getProviderRegion('u', 'openai', 'api_key')).toBeNull();
     });
   });
+});
 
-  /* ── getAuthType ── */
+/**
+ * Per-agent provider-visibility gate on the proxy hot path. The existing specs
+ * above construct ProviderKeyService WITHOUT an enabledProviderRepo, so every
+ * call hits the `enabledProviderRepo == null` short-circuit in
+ * filterProvidersForAgent and the real per-agent filter never runs. These tests
+ * build the service WITH a mocked enabledProviderRepo and drive the real filter
+ * through getProviderKeys → resolveProviderKeys → filterProvidersForAgent so a
+ * dropped `enabledIds.has(p.id)` check fails loudly.
+ */
+describe('ProviderKeyService — filterProvidersForAgent (per-agent visibility)', () => {
+  const SECRET = process.env['BETTER_AUTH_SECRET'] as string;
 
-  describe('getAuthType', () => {
-    it('should return subscription when subscription record with key exists', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-      ]);
+  const tenantProvider = (over: Partial<TenantProvider>): TenantProvider =>
+    ({
+      id: 'tp-1',
+      tenant_id: 'tenant-1',
+      created_by_user_id: null,
+      agent_id: null,
+      provider: 'openai',
+      // Real ciphertext so the private decryptOne path resolves to a key without
+      // mocking crypto — exercises the full resolve→decrypt→filter chain.
+      api_key_encrypted: encrypt('sk-real', SECRET),
+      key_prefix: null,
+      auth_type: 'api_key',
+      label: 'Default',
+      priority: 0,
+      region: null,
+      is_active: true,
+      connected_at: '',
+      updated_at: '',
+      cached_models: null,
+      models_fetched_at: null,
+      ...over,
+    }) as TenantProvider;
 
-      const result = await service.getAuthType('agent-1', 'openai');
+  const enabledRow = (tenantProviderId: string): AgentEnabledProvider =>
+    ({ agent_id: 'agent-1', tenant_provider_id: tenantProviderId }) as AgentEnabledProvider;
 
-      expect(result).toBe('subscription');
+  // providerRepo.find returns the tenant-global rows; routingCache always misses
+  // so resolveProviderKeys runs; enabledProviderRepo.find returns the agent's
+  // enabled junction rows.
+  const buildService = (opts: {
+    tenantProviders: TenantProvider[];
+    enabledRows: AgentEnabledProvider[];
+    enabledRepo?: Pick<Repository<AgentEnabledProvider>, 'find'> | null;
+  }): {
+    svc: ProviderKeyService;
+    enabledFind: jest.Mock;
+    setProviderKeys: jest.Mock;
+  } => {
+    const providerRepo = { find: jest.fn().mockResolvedValue(opts.tenantProviders) };
+    const setProviderKeys = jest.fn();
+    const routingCache = {
+      getProviderKeys: jest.fn().mockReturnValue(undefined),
+      setProviderKeys,
+    };
+    const enabledFind = jest.fn().mockResolvedValue(opts.enabledRows);
+    const enabledRepo = opts.enabledRepo === undefined ? { find: enabledFind } : opts.enabledRepo;
+
+    const svc = new ProviderKeyService(
+      providerRepo as never, // providerRepo
+      {} as never, // pricingCache
+      {} as never, // discoveryService
+      routingCache as never, // routingCache
+      {} as never, // providerService
+      enabledRepo as never, // enabledProviderRepo
+    );
+    return { svc, enabledFind, setProviderKeys };
+  };
+
+  it('returns [] when the agent has no enabled-provider rows (empty gate)', async () => {
+    const { svc, enabledFind } = buildService({
+      tenantProviders: [tenantProvider({ id: 'tp-openai', provider: 'openai' })],
+      enabledRows: [], // agent has enabled nothing → see nothing
     });
 
-    it('should return api_key when subscription has no key but api_key has key', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ auth_type: 'subscription', api_key_encrypted: null }),
-        makeProvider({ id: 'p2', auth_type: 'api_key', api_key_encrypted: 'enc' }),
-      ]);
+    const keys = await svc.getProviderKeys('tenant-1', 'openai', undefined, 'agent-1');
 
-      const result = await service.getAuthType('agent-1', 'openai');
-
-      expect(result).toBe('api_key');
-    });
-
-    it('should return first match auth_type when no records have keys', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ auth_type: 'subscription', api_key_encrypted: null }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'openai');
-
-      expect(result).toBe('subscription');
-    });
-
-    it('should return api_key as default when no providers match', async () => {
-      providerService.getProviders.mockResolvedValue([]);
-
-      const result = await service.getAuthType('agent-1', 'openai');
-
-      expect(result).toBe('api_key');
-    });
-
-    it('should expand provider aliases when matching', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'google', api_key_encrypted: 'enc', auth_type: 'api_key' }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'gemini');
-
-      expect(result).toBe('api_key');
-    });
-
-    it('should return api_key when subscription is excluded and both exist', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ id: 'p1', auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-        makeProvider({ id: 'p2', auth_type: 'api_key', api_key_encrypted: 'enc-api' }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'openai', new Set(['subscription']));
-
-      expect(result).toBe('api_key');
-    });
-
-    it('should return subscription when api_key is excluded and both exist', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ id: 'p1', auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-        makeProvider({ id: 'p2', auth_type: 'api_key', api_key_encrypted: 'enc-api' }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'openai', new Set(['api_key']));
-
-      expect(result).toBe('subscription');
-    });
-
-    it('should fall through to default when all auth types excluded', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ id: 'p1', auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-        makeProvider({ id: 'p2', auth_type: 'api_key', api_key_encrypted: 'enc-api' }),
-      ]);
-
-      const result = await service.getAuthType(
-        'agent-1',
-        'openai',
-        new Set(['subscription', 'api_key']),
-      );
-
-      // Falls through because filtered set is empty — original logic applies
-      expect(result).toBe('subscription');
-    });
-
-    it('should ignore exclusions when only one auth type exists', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ id: 'p1', auth_type: 'api_key', api_key_encrypted: 'enc-api' }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'openai', new Set(['api_key']));
-
-      // Falls through because filtering leaves empty set
-      expect(result).toBe('api_key');
-    });
-
-    it('should behave the same with empty exclusion set', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ id: 'p1', auth_type: 'subscription', api_key_encrypted: 'enc-sub' }),
-        makeProvider({ id: 'p2', auth_type: 'api_key', api_key_encrypted: 'enc-api' }),
-      ]);
-
-      const result = await service.getAuthType('agent-1', 'openai', new Set());
-
-      // Empty set has size 0, so exclusion logic is skipped — defaults to subscription
-      expect(result).toBe('subscription');
-    });
+    expect(keys).toEqual([]);
+    expect(enabledFind).toHaveBeenCalledWith({ where: { agent_id: 'agent-1' } });
   });
 
-  /* ── hasActiveProvider ── */
-
-  describe('hasActiveProvider', () => {
-    it('should return true when active provider exists', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'anthropic', is_active: true }),
-      ]);
-
-      expect(await service.hasActiveProvider('agent-1', 'anthropic')).toBe(true);
-    });
-
-    it('should return false when provider is inactive', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'anthropic', is_active: false }),
-      ]);
-
-      expect(await service.hasActiveProvider('agent-1', 'anthropic')).toBe(false);
-    });
-
-    it('should return false when provider does not exist', async () => {
-      providerService.getProviders.mockResolvedValue([]);
-
-      expect(await service.hasActiveProvider('agent-1', 'anthropic')).toBe(false);
-    });
-
-    it('should handle provider aliases (gemini/google)', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'google', is_active: true }),
-      ]);
-
-      expect(await service.hasActiveProvider('agent-1', 'gemini')).toBe(true);
-    });
-  });
-
-  /* ── findProviderForModel ── */
-
-  describe('findProviderForModel', () => {
-    it('should return provider when model found in cached_models', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({
-          provider: 'openai',
-          cached_models: [{ id: 'gpt-4o' }] as any[],
+  it('returns only the provider the agent has enabled when 1 of 2 tenant providers is allowed', async () => {
+    // Two tenant-global openai keys; the agent's junction enables only tp-b.
+    const { svc } = buildService({
+      tenantProviders: [
+        tenantProvider({
+          id: 'tp-a',
+          label: 'Personal',
+          api_key_encrypted: encrypt('sk-a', SECRET),
         }),
-      ]);
-
-      const result = await service.findProviderForModel('agent-1', 'gpt-4o');
-
-      expect(result).toBe('openai');
+        tenantProvider({ id: 'tp-b', label: 'Work', api_key_encrypted: encrypt('sk-b', SECRET) }),
+      ],
+      enabledRows: [enabledRow('tp-b')],
     });
 
-    it('should return undefined when model not found', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'openai', cached_models: [{ id: 'gpt-3.5' }] as any[] }),
-      ]);
+    const keys = await svc.getProviderKeys('tenant-1', 'openai', undefined, 'agent-1');
 
-      const result = await service.findProviderForModel('agent-1', 'gpt-4o');
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should skip providers with null cached_models', async () => {
-      providerService.getProviders.mockResolvedValue([
-        makeProvider({ provider: 'openai', cached_models: null }),
-      ]);
-
-      const result = await service.findProviderForModel('agent-1', 'gpt-4o');
-
-      expect(result).toBeUndefined();
-    });
+    expect(keys).toHaveLength(1);
+    expect(keys[0].id).toBe('tp-b');
+    expect(keys[0].label).toBe('Work');
+    expect(keys[0].apiKey).toBe('sk-b');
   });
 
-  /* ── getEffectiveModel ── */
-
-  describe('getEffectiveModel', () => {
-    it('should return override model when available and model is available', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue({ id: 'gpt-4o' });
-      const assignment = {
-        override_model: 'gpt-4o',
-        auto_assigned_model: 'gpt-3.5',
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('gpt-4o');
+  it('keeps multiple providers when several are enabled for the agent', async () => {
+    const { svc } = buildService({
+      tenantProviders: [
+        tenantProvider({
+          id: 'tp-a',
+          label: 'Personal',
+          api_key_encrypted: encrypt('sk-a', SECRET),
+        }),
+        tenantProvider({ id: 'tp-b', label: 'Work', api_key_encrypted: encrypt('sk-b', SECRET) }),
+      ],
+      enabledRows: [enabledRow('tp-a'), enabledRow('tp-b')],
     });
 
-    it('should fall through to auto when override model is not available', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue(null);
-      providerRepo.find.mockResolvedValue([]);
-      pricingCache.getByModel.mockReturnValue(undefined);
-      const assignment = {
-        override_model: 'gpt-4o',
-        auto_assigned_model: 'gpt-3.5',
-        tier: 'simple',
-      } as TierAssignment;
+    const keys = await svc.getProviderKeys('tenant-1', 'openai', undefined, 'agent-1');
 
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('gpt-3.5');
-    });
-
-    it('should return auto_assigned_model when no override', async () => {
-      const assignment = {
-        override_model: null,
-        auto_assigned_model: 'gpt-3.5',
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('gpt-3.5');
-    });
-
-    it('should return null when auto_assigned_model is null', async () => {
-      const assignment = {
-        override_model: null,
-        auto_assigned_model: null,
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBeNull();
-    });
+    expect(keys.map((k) => k.id).sort()).toEqual(['tp-a', 'tp-b']);
   });
 
-  /* ── isModelAvailable (private, via getEffectiveModel) ── */
-
-  describe('isModelAvailable (via getEffectiveModel)', () => {
-    it('should return true when model is discovered', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue({ id: 'gpt-4o' });
-      const assignment = {
-        override_model: 'gpt-4o',
-        auto_assigned_model: null,
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('gpt-4o');
+  it('falls back to all providers (no per-agent filter) when no agentId is passed', async () => {
+    // agentId undefined → filterProvidersForAgent short-circuits BEFORE touching
+    // the repo, so even with an enabledProviderRepo present every key is returned.
+    const { svc, enabledFind } = buildService({
+      tenantProviders: [
+        tenantProvider({
+          id: 'tp-a',
+          label: 'Personal',
+          api_key_encrypted: encrypt('sk-a', SECRET),
+        }),
+        tenantProvider({ id: 'tp-b', label: 'Work', api_key_encrypted: encrypt('sk-b', SECRET) }),
+      ],
+      enabledRows: [],
     });
 
-    it('should match via pricing provider names', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue(null);
-      pricingCache.getByModel.mockReturnValue({ provider: 'OpenAI', model_name: 'gpt-4o' });
-      providerRepo.find.mockResolvedValue([makeProvider({ provider: 'openai' })]);
-      const assignment = {
-        override_model: 'gpt-4o',
-        auto_assigned_model: null,
-        tier: 'simple',
-      } as TierAssignment;
+    const keys = await svc.getProviderKeys('tenant-1', 'openai'); // no agentId
 
-      const result = await service.getEffectiveModel('agent-1', assignment);
+    expect(keys.map((k) => k.id).sort()).toEqual(['tp-a', 'tp-b']);
+    expect(enabledFind).not.toHaveBeenCalled();
+  });
 
-      expect(result).toBe('gpt-4o');
+  it('null-repo short-circuit still returns all tenant providers even with an agentId', async () => {
+    // The legacy/self-hosted path: enabledProviderRepo is null, so the agent
+    // scope is a no-op and every provider stays visible.
+    const { svc } = buildService({
+      tenantProviders: [
+        tenantProvider({
+          id: 'tp-a',
+          label: 'Personal',
+          api_key_encrypted: encrypt('sk-a', SECRET),
+        }),
+        tenantProvider({ id: 'tp-b', label: 'Work', api_key_encrypted: encrypt('sk-b', SECRET) }),
+      ],
+      enabledRows: [],
+      enabledRepo: null,
     });
 
-    it('should match via model name prefix inference from pricing', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue(null);
-      pricingCache.getByModel.mockReturnValue({
-        provider: 'SomeProvider',
-        model_name: 'openai/gpt-4o',
-      });
-      // No direct match on "someprovider"
-      providerRepo.find.mockResolvedValue([makeProvider({ provider: 'openai' })]);
-      const assignment = {
-        override_model: 'gpt-4o',
-        auto_assigned_model: null,
-        tier: 'simple',
-      } as TierAssignment;
+    const keys = await svc.getProviderKeys('tenant-1', 'openai', undefined, 'agent-1');
 
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('gpt-4o');
-    });
-
-    it('should match via model name prefix inference when no pricing exists', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue(null);
-      pricingCache.getByModel.mockReturnValue(undefined);
-      providerRepo.find.mockResolvedValue([makeProvider({ provider: 'anthropic' })]);
-      const assignment = {
-        override_model: 'anthropic/claude-sonnet-4',
-        auto_assigned_model: null,
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('anthropic/claude-sonnet-4');
-    });
-
-    it('should return false (fall to auto) when model not available anywhere', async () => {
-      discoveryService.getModelForAgent.mockResolvedValue(null);
-      pricingCache.getByModel.mockReturnValue(undefined);
-      providerRepo.find.mockResolvedValue([makeProvider({ provider: 'anthropic' })]);
-      const assignment = {
-        override_model: 'nonexistent-model',
-        auto_assigned_model: 'claude-3-haiku',
-        tier: 'simple',
-      } as TierAssignment;
-
-      const result = await service.getEffectiveModel('agent-1', assignment);
-
-      expect(result).toBe('claude-3-haiku');
-    });
+    expect(keys.map((k) => k.id).sort()).toEqual(['tp-a', 'tp-b']);
   });
 });

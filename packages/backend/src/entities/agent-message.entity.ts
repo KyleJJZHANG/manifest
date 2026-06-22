@@ -10,6 +10,14 @@ import type { CallerAttribution } from '../routing/proxy/caller-classifier';
 @Index(['tenant_id', 'trace_id'])
 @Index(['tenant_id', 'model'])
 @Index(['tenant_id', 'agent_id', 'status'])
+// Per-completion success dedup (ProxyMessageDedup.findExistingSuccessMessage)
+// filters tenant_id + agent_id + model + status='ok' and orders by timestamp.
+@Index(['tenant_id', 'agent_id', 'model', 'status', 'timestamp'])
+// Per-connection analytics scope by the exact key that served each message
+// (tenant_provider_id) ordered by recency, and the FK below resolves its
+// ON DELETE SET NULL against the same column. tenant_provider_id leads so one
+// index serves both the connection-detail reads and the parent-delete cleanup.
+@Index(['tenant_provider_id', 'tenant_id', 'timestamp'])
 export class AgentMessage {
   @PrimaryColumn('varchar')
   id!: string;
@@ -92,6 +100,12 @@ export class AgentMessage {
   @Column('integer', { nullable: true })
   fallback_index!: number | null;
 
+  /**
+   * DEPRECATED — informational attribution only, written by the proxy
+   * recorder. Never filter, scope, key, or authorize by this column; all
+   * scoping goes through `tenant_id`. Kept because agent_messages is the
+   * big hot table and a column drop isn't worth the rewrite.
+   */
   @Column('varchar', { nullable: true })
   user_id!: string | null;
 
@@ -101,11 +115,17 @@ export class AgentMessage {
   @Column('boolean', { default: false })
   specificity_miscategorized!: boolean;
 
+  @Column('boolean', { default: false })
+  recorded!: boolean;
+
   @Column('simple-json', { nullable: true })
   caller_attribution!: CallerAttribution | null;
 
   @Column('simple-json', { nullable: true })
   request_headers!: Record<string, string> | null;
+
+  @Column('jsonb', { nullable: true })
+  request_params!: object | null;
 
   @Column('varchar', { nullable: true })
   header_tier_id!: string | null;
@@ -124,4 +144,15 @@ export class AgentMessage {
 
   @Column('text', { nullable: true })
   feedback_details!: string | null;
+
+  @Column('varchar', { nullable: true })
+  provider_key_label!: string | null;
+
+  // The exact tenant_providers row (connection/key) that served this message.
+  // Stamped at proxy time from the selected CachedProviderKey.id so per-connection
+  // analytics filter on identity rather than the (provider, auth_type, label)
+  // tuple — which is not unique per key (default label 'Default'; NULL coerces to
+  // it). NULL for pre-upgrade history, local/Ollama, and blind-proxy paths.
+  @Column('varchar', { nullable: true })
+  tenant_provider_id!: string | null;
 }

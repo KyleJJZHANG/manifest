@@ -1,4 +1,9 @@
 import { Response as ExpressResponse } from 'express';
+import {
+  createSsePayloadParser,
+  DEFAULT_MAX_SSE_BUFFER_SIZE,
+  formatSseComment,
+} from './sse-parser';
 
 export interface StreamUsage {
   prompt_tokens: number;
@@ -8,53 +13,142 @@ export interface StreamUsage {
 }
 
 /**
- * Pick cached-input tokens from an OpenAI-compatible `usage` object.
+ * Read a usage block in either OpenAI-compat (`prompt_tokens`/`completion_tokens`)
+ * or Anthropic-native (`input_tokens`/`output_tokens`) shape and normalise it
+ * to a `StreamUsage`. Returns null when neither shape is present.
  *
- * Prefers the manifest-internal `cache_read_tokens` field (already populated by
- * the Anthropic / ChatGPT adapters) and falls back to the OpenAI standard
- * `prompt_tokens_details.cached_tokens` — which is what raw passthrough
- * providers emit (Volcengine Ark, native DeepSeek, MiniMax, OpenAI itself).
- * Without this fallback, custom OpenAI-compatible providers always recorded 0
- * even when the upstream actually served from cache.
+ * OpenAI-compatible providers expose cached prompt tokens under the nested
+ * `prompt_tokens_details.cached_tokens` field, not the top-level
+ * `cache_read_tokens` key — DeepSeek, Z.AI, MiniMax, Mistral, etc. all use the
+ * nested form. Falling back to the nested key keeps the cache column populated
+ * for those providers.
  */
-export function pickCacheReadTokens(usage: Record<string, unknown>): number | undefined {
-  if (typeof usage.cache_read_tokens === 'number') return usage.cache_read_tokens;
-  const details = usage.prompt_tokens_details;
-  if (details && typeof details === 'object' && !Array.isArray(details)) {
-    const cached = (details as Record<string, unknown>).cached_tokens;
-    if (typeof cached === 'number') return cached;
+export function parseUsageObject(usage: unknown): StreamUsage | null {
+  if (!usage || typeof usage !== 'object') return null;
+  const u = usage as Record<string, unknown>;
+
+  if (typeof u.prompt_tokens === 'number') {
+    const promptDetails =
+      typeof u.prompt_tokens_details === 'object' && u.prompt_tokens_details !== null
+        ? (u.prompt_tokens_details as Record<string, unknown>)
+        : undefined;
+    const cacheRead =
+      typeof u.cache_read_tokens === 'number'
+        ? u.cache_read_tokens
+        : typeof promptDetails?.cached_tokens === 'number'
+          ? promptDetails.cached_tokens
+          : undefined;
+    return {
+      prompt_tokens: u.prompt_tokens,
+      completion_tokens: typeof u.completion_tokens === 'number' ? u.completion_tokens : 0,
+      cache_read_tokens: cacheRead,
+      cache_creation_tokens:
+        typeof u.cache_creation_tokens === 'number' ? u.cache_creation_tokens : undefined,
+    };
   }
-  return undefined;
+
+  if (typeof u.input_tokens === 'number') {
+    // Two shapes share this branch:
+    //   - Anthropic native (`POST /v1/messages` passthrough): cache reads
+    //     and creations live at the top of the usage object as
+    //     `cache_read_input_tokens` / `cache_creation_input_tokens`, and
+    //     `input_tokens` is the non-cached portion. Total prompt tokens =
+    //     input + cache_read + cache_creation, matching what the converted
+    //     `fromAnthropicResponse` path used to record.
+    //   - OpenAI Responses API: cached count nests under
+    //     `input_tokens_details.cached_tokens`, and `input_tokens` is
+    //     already the total. No summing here or we'd double-count cache.
+    const inputDetails =
+      typeof u.input_tokens_details === 'object' && u.input_tokens_details !== null
+        ? (u.input_tokens_details as Record<string, unknown>)
+        : undefined;
+    const nativeCacheRead =
+      typeof u.cache_read_input_tokens === 'number' ? u.cache_read_input_tokens : 0;
+    const nativeCacheCreation =
+      typeof u.cache_creation_input_tokens === 'number' ? u.cache_creation_input_tokens : 0;
+    const isAnthropicNative = nativeCacheRead > 0 || nativeCacheCreation > 0;
+    const nestedCacheRead =
+      typeof inputDetails?.cached_tokens === 'number' ? inputDetails.cached_tokens : 0;
+    const promptTokens = isAnthropicNative
+      ? u.input_tokens + nativeCacheRead + nativeCacheCreation
+      : u.input_tokens;
+    const cacheRead = nativeCacheRead || nestedCacheRead;
+    return {
+      prompt_tokens: promptTokens,
+      completion_tokens: typeof u.output_tokens === 'number' ? u.output_tokens : 0,
+      cache_read_tokens: isAnthropicNative ? nativeCacheRead : cacheRead || undefined,
+      cache_creation_tokens: nativeCacheCreation,
+    };
+  }
+
+  return null;
 }
 
-/** Extract usage data from an SSE-formatted text chunk (e.g. `data: {...}\n\n`). */
+function extractUsageFromObject(obj: unknown): StreamUsage | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const record = obj as Record<string, unknown>;
+  const fromUsage = parseUsageObject(record.usage);
+  if (fromUsage) return fromUsage;
+  const response = record.response;
+  if (response && typeof response === 'object') {
+    return parseUsageObject((response as Record<string, unknown>).usage);
+  }
+  return null;
+}
+
+function extractUsageFromJsonPayload(payload: string): StreamUsage | null {
+  const trimmed = payload.trim();
+  if (!trimmed || trimmed === '[DONE]') return null;
+  try {
+    return extractUsageFromObject(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonPayloadFromParsedEvent(eventText: string): string {
+  return eventText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line &&
+        !line.startsWith('event:') &&
+        !line.startsWith('id:') &&
+        !line.startsWith('retry:') &&
+        !line.startsWith(':'),
+    )
+    .map((line) => (line.startsWith('data:') ? line.slice(5).trim() : line))
+    .join('\n')
+    .trim();
+}
+
+/** Extract usage data from SSE text, parsed SSE event text, or raw JSON. */
 export function extractUsageFromSse(sseText: string): StreamUsage | null {
   for (const line of sseText.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) continue;
     const json = trimmed.slice(5).trim();
-    if (json === '[DONE]') continue;
-    try {
-      const obj = JSON.parse(json);
-      if (obj.usage && typeof obj.usage.prompt_tokens === 'number') {
-        return {
-          prompt_tokens: obj.usage.prompt_tokens,
-          completion_tokens: obj.usage.completion_tokens ?? 0,
-          cache_read_tokens: pickCacheReadTokens(obj.usage),
-          cache_creation_tokens: obj.usage.cache_creation_tokens,
-        };
-      }
-    } catch {
-      /* ignore parse errors */
-    }
+    const usage = extractUsageFromJsonPayload(json);
+    if (usage) return usage;
   }
-  return null;
+
+  const usage = extractUsageFromJsonPayload(sseText);
+  if (usage) return usage;
+
+  const payload = extractJsonPayloadFromParsedEvent(sseText);
+  if (!payload || payload === sseText.trim()) return null;
+  return extractUsageFromJsonPayload(payload);
 }
 
 export function initSseHeaders(
   res: ExpressResponse,
   extraHeaders: Record<string, string> = {},
+  statusCode?: number,
 ): void {
+  if (statusCode !== undefined) {
+    res.statusCode = statusCode;
+  }
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -65,50 +159,133 @@ export function initSseHeaders(
   res.flushHeaders();
 }
 
+const MAX_SSE_BUFFER_SIZE = DEFAULT_MAX_SSE_BUFFER_SIZE;
+
 /**
- * Parses an SSE text stream into individual event payloads.
- * Handles `data: ` prefixes, multi-event chunks, and partial
- * chunks that split across TCP reads.
+ * Forward an SSE stream byte-for-byte from `source` to `dest` while running a
+ * `tap` parser over the parsed events for telemetry side effects. The wire
+ * bytes are written unchanged, so SSE framing (`event:` headers, multi-line
+ * `data:` payloads, blank-line separators) is preserved end-to-end. Used by
+ * the `/v1/messages` → Anthropic passthrough path where translation must
+ * NOT touch the wire format but Manifest still needs to extract usage and
+ * cache thinking blocks.
+ *
+ * The tap receives the same parsed-event shape `pipeStream` would have
+ * passed to its `transform`. Its return value (an OpenAI-shape chunk in
+ * practice) is parsed for usage; nothing it returns is written to `dest`.
  */
-export function parseSseEvents(buffer: string): { events: string[]; remaining: string } {
-  const events: string[] = [];
-  let remaining = buffer;
+export async function pipePassthrough(
+  source: ReadableStream<Uint8Array>,
+  dest: ExpressResponse,
+  tap: (parsedEvent: string) => string | null,
+  onClientChunk?: (text: string) => void,
+): Promise<StreamUsage | null> {
+  const reader = source.getReader();
+  const decoder = new TextDecoder();
+  let capturedUsage: StreamUsage | null = null;
+  const parser = createSsePayloadParser({ maxBufferSize: MAX_SSE_BUFFER_SIZE });
 
-  // Split on double-newline (SSE event boundary)
-  let idx: number;
-  while ((idx = remaining.indexOf('\n\n')) !== -1) {
-    const raw = remaining.slice(0, idx).trim();
-    remaining = remaining.slice(idx + 2);
-
-    if (!raw) continue;
-
-    // Strip "data: " prefix from each line and join
-    const payload = raw
-      .split('\n')
-      .map((line) => (line.startsWith('data: ') ? line.slice(6) : line))
-      .join('\n')
-      .trim();
-
-    if (payload && payload !== '[DONE]') {
-      events.push(payload);
+  try {
+    let done = false;
+    while (!done) {
+      if (dest.writableEnded) break;
+      const result = await reader.read();
+      done = result.done;
+      if (result.value) {
+        // Write the upstream bytes through unchanged so the client sees
+        // intact SSE framing.
+        dest.write(Buffer.from(result.value));
+        const text = decoder.decode(result.value, { stream: !done });
+        if (onClientChunk) onClientChunk(text);
+        for (const event of parser.feed(text)) {
+          const tapped = tap(event);
+          if (tapped) {
+            const usage = extractUsageFromSse(tapped);
+            if (usage) capturedUsage = usage;
+          }
+        }
+      }
     }
+    const finalText = decoder.decode();
+    if (finalText) {
+      for (const event of parser.feed(finalText)) {
+        const tapped = tap(event);
+        if (tapped) {
+          const usage = extractUsageFromSse(tapped);
+          if (usage) capturedUsage = usage;
+        }
+      }
+    }
+    for (const event of parser.flush()) {
+      const tapped = tap(event);
+      if (tapped) {
+        const usage = extractUsageFromSse(tapped);
+        if (usage) capturedUsage = usage;
+      }
+    }
+  } finally {
+    if (!dest.writableEnded) dest.end();
+    reader.releaseLock();
   }
 
-  return { events, remaining };
+  return capturedUsage;
 }
-
-const MAX_SSE_BUFFER_SIZE = 1_048_576;
 
 export async function pipeStream(
   source: ReadableStream<Uint8Array>,
   dest: ExpressResponse,
   transform?: (chunk: string) => string | null,
+  finalize?: () => string | null,
+  onClientChunk?: (text: string) => void,
 ): Promise<StreamUsage | null> {
   const reader = source.getReader();
   const decoder = new TextDecoder();
-  let sseBuffer = '';
-  let passthroughBuffer = '';
   let capturedUsage: StreamUsage | null = null;
+
+  const writeOut = (s: string): void => {
+    dest.write(s);
+    if (onClientChunk) onClientChunk(s);
+  };
+  const transformParser = transform
+    ? createSsePayloadParser({
+        maxBufferSize: MAX_SSE_BUFFER_SIZE,
+        onComment: (comment) => {
+          if (!dest.writableEnded) writeOut(formatSseComment(comment));
+        },
+      })
+    : null;
+  const passthroughParser = transform
+    ? null
+    : createSsePayloadParser({ maxBufferSize: MAX_SSE_BUFFER_SIZE });
+
+  const applyTransformedEvents = (events: string[]): void => {
+    if (!transform) return;
+    for (const event of events) {
+      const transformed = transform(event);
+      if (transformed) {
+        writeOut(transformed);
+        const usage = extractUsageFromSse(transformed);
+        if (usage) capturedUsage = usage;
+      }
+    }
+  };
+
+  const capturePassthroughUsage = (events: string[]): void => {
+    for (const ev of events) {
+      const usage = extractUsageFromSse(ev);
+      if (usage) capturedUsage = usage;
+    }
+  };
+
+  const consumeText = (text: string): void => {
+    if (!text) return;
+    if (transform && transformParser) {
+      applyTransformedEvents(transformParser.feed(text));
+      return;
+    }
+    writeOut(text);
+    if (passthroughParser) capturePassthroughUsage(passthroughParser.feed(text));
+  };
 
   try {
     let done = false;
@@ -120,98 +297,28 @@ export async function pipeStream(
 
       if (result.value) {
         const text = decoder.decode(result.value, { stream: !done });
-
-        if (transform) {
-          sseBuffer += text;
-          if (sseBuffer.length > MAX_SSE_BUFFER_SIZE) {
-            throw new Error('SSE buffer overflow: provider sent data without event boundaries');
-          }
-          const { events, remaining } = parseSseEvents(sseBuffer);
-          sseBuffer = remaining;
-
-          for (const event of events) {
-            const transformed = transform(event);
-            if (transformed) {
-              dest.write(transformed);
-              const usage = extractUsageFromSse(transformed);
-              if (usage) capturedUsage = usage;
-            }
-          }
-        } else {
-          dest.write(text);
-          passthroughBuffer += text;
-          if (passthroughBuffer.length > MAX_SSE_BUFFER_SIZE) {
-            throw new Error('SSE buffer overflow: provider sent data without event boundaries');
-          }
-          const { events: ptEvents, remaining } = parseSseEvents(passthroughBuffer);
-          passthroughBuffer = remaining;
-          for (const ev of ptEvents) {
-            try {
-              const obj = JSON.parse(ev);
-              if (obj.usage && typeof obj.usage.prompt_tokens === 'number') {
-                capturedUsage = {
-                  prompt_tokens: obj.usage.prompt_tokens,
-                  completion_tokens: obj.usage.completion_tokens ?? 0,
-                  cache_read_tokens: pickCacheReadTokens(obj.usage),
-                  cache_creation_tokens: obj.usage.cache_creation_tokens,
-                };
-              }
-            } catch {
-              /* ignore non-JSON events */
-            }
-          }
-        }
+        consumeText(text);
       }
     }
 
-    // Flush any remaining passthrough buffer content for usage extraction.
-    // The final SSE chunk (containing usage) may not end with \n\n,
-    // leaving it unparsed in passthroughBuffer.
-    if (!transform && passthroughBuffer.trim()) {
-      const payload = passthroughBuffer
-        .split('\n')
-        .map((line) => (line.startsWith('data: ') ? line.slice(6) : line))
-        .join('\n')
-        .trim();
-      if (payload && payload !== '[DONE]') {
-        try {
-          const obj = JSON.parse(payload);
-          if (obj.usage && typeof obj.usage.prompt_tokens === 'number') {
-            capturedUsage = {
-              prompt_tokens: obj.usage.prompt_tokens,
-              completion_tokens: obj.usage.completion_tokens ?? 0,
-              cache_read_tokens: pickCacheReadTokens(obj.usage),
-              cache_creation_tokens: obj.usage.cache_creation_tokens,
-            };
-          }
-        } catch {
-          /* ignore non-JSON remaining content */
-        }
-      }
+    consumeText(decoder.decode());
+    if (transform && transformParser) {
+      applyTransformedEvents(transformParser.flush());
+    } else if (passthroughParser) {
+      capturePassthroughUsage(passthroughParser.flush());
     }
 
-    // Flush any remaining buffer content through the transform
-    if (transform && sseBuffer.trim()) {
-      const payload = sseBuffer
-        .split('\n')
-        .map((line) => (line.startsWith('data: ') ? line.slice(6) : line))
-        .join('\n')
-        .trim();
-      if (payload && payload !== '[DONE]') {
-        const transformed = transform(payload);
-        if (transformed) {
-          dest.write(transformed);
-          const usage = extractUsageFromSse(transformed);
+    if (transform && !dest.writableEnded) {
+      if (finalize) {
+        const trailing = finalize();
+        if (trailing && !dest.writableEnded) {
+          writeOut(trailing);
+          const usage = extractUsageFromSse(trailing);
           if (usage) capturedUsage = usage;
         }
+      } else if (!dest.writableEnded) {
+        writeOut('data: [DONE]\n\n');
       }
-    }
-
-    // Ensure the stream ends with [DONE] for OpenAI-compatible clients.
-    // Non-transformed streams (OpenAI) already include it from the provider.
-    // Transformed streams (Google) need it added explicitly.
-    if (transform) {
-      dest.write('data: [DONE]\n\n');
     }
   } finally {
     reader.releaseLock();

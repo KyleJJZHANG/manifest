@@ -1,6 +1,7 @@
 import {
   collectChatGptSseResponse,
   fromResponsesResponse,
+  ResponsesSseError,
   toResponsesRequest,
   transformResponsesStreamChunk,
 } from './chatgpt-adapter';
@@ -158,6 +159,64 @@ describe('chatgpt-adapter', () => {
       // — OpenAI's /v1/responses endpoint rejects or ignores them.
       expect(req).not.toHaveProperty('messages');
       expect(req).not.toHaveProperty('max_tokens');
+      // Default: max_output_tokens is NOT mapped (ChatGPT subscription rejects it).
+      expect(req).not.toHaveProperty('max_output_tokens');
+    });
+
+    it('does not map max_tokens to max_output_tokens by default (subscription safe)', () => {
+      const body = {
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 4096,
+      };
+
+      const req = toResponsesRequest(body, 'gpt-5-codex');
+
+      expect(req).not.toHaveProperty('max_output_tokens');
+      expect(req).not.toHaveProperty('max_tokens');
+    });
+
+    it('maps max_tokens to max_output_tokens when mapMaxOutputTokens is true', () => {
+      const body = {
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 4096,
+      };
+
+      const req = toResponsesRequest(body, 'gpt-5-codex', { mapMaxOutputTokens: true });
+
+      expect(req.max_output_tokens).toBe(4096);
+      expect(req).not.toHaveProperty('max_tokens');
+    });
+
+    it('maps max_completion_tokens to max_output_tokens when mapMaxOutputTokens is true', () => {
+      const body = {
+        messages: [{ role: 'user', content: 'hi' }],
+        max_completion_tokens: 2048,
+      };
+
+      const req = toResponsesRequest(body, 'gpt-5-codex', { mapMaxOutputTokens: true });
+
+      expect(req.max_output_tokens).toBe(2048);
+      expect(req).not.toHaveProperty('max_completion_tokens');
+    });
+
+    it('prefers max_completion_tokens over max_tokens when both present', () => {
+      const body = {
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 4096,
+        max_completion_tokens: 2048,
+      };
+
+      const req = toResponsesRequest(body, 'gpt-5-codex', { mapMaxOutputTokens: true });
+
+      expect(req.max_output_tokens).toBe(2048);
+    });
+
+    it('omits max_output_tokens when caller did not specify a cap', () => {
+      const body = { messages: [{ role: 'user', content: 'hi' }] };
+
+      const req = toResponsesRequest(body, 'gpt-5-codex', { mapMaxOutputTokens: true });
+
+      expect(req).not.toHaveProperty('max_output_tokens');
     });
   });
 
@@ -352,6 +411,35 @@ describe('chatgpt-adapter', () => {
       expect(out.usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
       const choices = out.choices as Array<Record<string, unknown>>;
       expect((choices[0].message as Record<string, unknown>).content).toBeNull();
+    });
+
+    it('throws an upstream error when the Responses stream emits an error event', () => {
+      const sse =
+        'event: error\ndata: {"type":"invalid_request_error","code":"model_not_found","message":"Model unavailable"}';
+
+      expect(() => collectChatGptSseResponse(sse, 'gpt-5')).toThrow(ResponsesSseError);
+
+      try {
+        collectChatGptSseResponse(sse, 'gpt-5');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ResponsesSseError);
+        expect((err as ResponsesSseError).status).toBe(404);
+        expect((err as ResponsesSseError).body).toContain('Model unavailable');
+      }
+    });
+
+    it('throws an upstream error when the Responses stream emits response.failed', () => {
+      const sse =
+        'event: response.failed\ndata: {"response":{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}}';
+
+      try {
+        collectChatGptSseResponse(sse, 'gpt-5');
+        fail('Expected ResponsesSseError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ResponsesSseError);
+        expect((err as ResponsesSseError).status).toBe(429);
+        expect((err as ResponsesSseError).body).toContain('Too many requests');
+      }
     });
 
     it('drops function_call_arguments deltas that arrive for an unknown output_index', () => {

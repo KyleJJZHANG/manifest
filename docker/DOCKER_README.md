@@ -17,7 +17,7 @@
 
 ## What is Manifest?
 
-Manifest is a smart model router for **personal AI agents** like OpenClaw, Hermes, or anything speaking the OpenAI-compatible HTTP API. It sits between your agent and your LLM providers, scores each request, and routes it to the cheapest model that can handle it. Simple questions go to fast, cheap models. Hard problems go to expensive ones. You save money without thinking about it.
+Manifest is a smart model router for **AI agents** like OpenClaw, Hermes, or anything speaking the OpenAI-compatible HTTP API. It sits between your agent and your LLM providers, scores each request, and routes it to the cheapest model that can handle it. Simple questions go to fast, cheap models. Hard problems go to expensive ones. You save money without thinking about it.
 
 - Route requests to the right model: cut costs up to 70%
 - Automatic fallbacks: if a model fails, the next one picks up
@@ -45,7 +45,7 @@ Manifest is a smart model router for **personal AI agents** like OpenClaw, Herme
 
 ## Supported providers
 
-Works with 300+ models across OpenAI, Anthropic, Google Gemini, DeepSeek, xAI, Mistral, Qwen, MiniMax, Kimi, Amazon Nova, Z.ai, OpenRouter, Ollama, and any provider with an OpenAI-compatible API. Connect with an API key, or reuse an existing paid subscription (ChatGPT Plus/Pro, Claude Max/Pro, GLM Coding Plan, etc.) where supported.
+Works with 300+ models across OpenAI, Anthropic, Google Gemini, DeepSeek, xAI, Mistral, Qwen, MiniMax, Kimi, Amazon Nova, Z.ai, OpenRouter, Ollama, and any provider with an OpenAI-compatible API. Connect with an API key, or reuse an existing paid subscription (ChatGPT Plus/Pro, Claude Max/Pro, Kimi Coding Plan, GLM Coding Plan, etc.) where supported.
 
 ## Manifest vs OpenRouter
 
@@ -306,9 +306,22 @@ ollama pull llama3.1:8b
 2. Providers → API Keys → click the **LM Studio** tile.
 3. Manifest probes `http://host.docker.internal:1234/v1`, discovers your loaded models, and connects them in one click.
 
+### llama.cpp
+
+1. Build `llama-server` from the [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) repo (or grab a release binary), then start it with a GGUF model bound to `0.0.0.0` so the Manifest container can reach it:
+
+   ```bash
+   ./llama-server -m models/llama-3.1-8b-instruct.Q4_K_M.gguf --host 0.0.0.0 --port 8080
+   ```
+
+   `llama-server` only listens on `0.0.0.0` if you pass `--host 0.0.0.0`; the default bind isn't reachable from Docker.
+
+2. Providers → API Keys → click the **llama.cpp** tile.
+3. Manifest probes `http://host.docker.internal:8080/v1`, lists the model your server loaded, and connects it in one click. Pre-b3800 builds that don't expose `/v1/models` get a hint to upgrade or fall back to **Add custom provider**.
+
 ### Any other OpenAI-compatible server
 
-For vLLM, llama.cpp, text-generation-webui, TogetherAI proxies, Azure OpenAI gateways, or anything else that speaks OpenAI's HTTP API:
+For vLLM, text-generation-webui, TogetherAI proxies, Azure OpenAI gateways, or anything else that speaks OpenAI's HTTP API:
 
 1. Start your server on the host bound to `0.0.0.0`.
 2. Providers → API Keys → **Add custom provider** → type the URL (e.g. `http://host.docker.internal:8000/v1`).
@@ -317,6 +330,19 @@ For vLLM, llama.cpp, text-generation-webui, TogetherAI proxies, Azure OpenAI gat
 ### Running Ollama on another machine
 
 If Ollama runs on a different host on your LAN, set `OLLAMA_HOST` in `.env` to the full URL (e.g. `http://192.168.1.20:11434`) and restart the stack. Private IPs are allowed in the self-hosted version.
+
+### Podman / rootless containers
+
+Podman doesn't ship `/.dockerenv` or `host.docker.internal`. Manifest still
+auto-detects Podman via `/run/.containerenv` and treats the install as
+self-hosted, but the canonical hostname for reaching the host from inside
+a Podman container is `host.containers.internal` (Podman 4+ exposes this
+by default; older versions need `--add-host=host.containers.internal:host-gateway`).
+If you run Manifest as one Podman service and your LLM server (llama.cpp,
+Ollama, etc.) as another, point Manifest at the service name on the shared
+network — e.g. `http://llamacpp:8080/v1` — and **Add custom provider** will
+accept it as long as `MANIFEST_MODE=selfhosted` (the bundled compose file
+sets this automatically).
 
 ## Environment variables
 

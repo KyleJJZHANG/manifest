@@ -1,191 +1,742 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@solidjs/testing-library";
-import { createSignal } from "solid-js";
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, fireEvent } from '@solidjs/testing-library';
 
-vi.mock("../../src/components/ProviderSelectModal.js", () => ({
-  default: (props: any) => (
-    <div data-testid="provider-modal">
-      <button onClick={props.onClose}>Done</button>
-    </div>
-  ),
+// Capture all ModelPickerModal renders so the test can assert which models /
+// tiers got passed through.
+const pickerCalls: Array<Record<string, unknown>> = [];
+
+vi.mock('../../src/components/ModelPickerModal.js', () => ({
+  default: (props: Record<string, unknown>) => {
+    pickerCalls.push({
+      tierId: props.tierId,
+      agentName: props.agentName,
+      modelsCount: (props.models as { length: number } | undefined)?.length ?? 0,
+      modelsList: ((props.models as { model_name: string }[] | undefined) ?? []).map(
+        (m) => `${m.model_name}:${(m as { auth_type?: string }).auth_type ?? ''}`,
+      ),
+      tiersCount: (props.tiers as { length: number } | undefined)?.length ?? 0,
+      customProvidersCount: (props.customProviders as { length: number } | undefined)?.length ?? 0,
+      connectedProvidersCount:
+        (props.connectedProviders as { length: number } | undefined)?.length ?? 0,
+      requiredCapability: props.requiredCapability,
+      providerRefreshed: props.onProviderRefreshed,
+    });
+    return (
+      <div
+        data-testid={`picker-${props.tierId}`}
+        onClick={() =>
+          (props.onSelect as (id: string, m: string, p: string, a?: string) => void)(
+            props.tierId as string,
+            'gpt-4o',
+            'openai',
+            'api_key',
+          )
+        }
+      >
+        picker
+        <button
+          data-testid={`picker-close-${props.tierId}`}
+          onClick={() => (props.onClose as () => void)()}
+        >
+          close
+        </button>
+        <button
+          data-testid={`picker-connect-${props.tierId}`}
+          onClick={() => (props.onConnectProviders as () => void)?.()}
+        >
+          connect
+        </button>
+      </div>
+    );
+  },
 }));
 
-vi.mock("../../src/services/api.js", () => ({
-  getModelPrices: vi.fn().mockResolvedValue({ models: [], lastSyncedAt: null }),
-  getAgentKey: vi.fn().mockResolvedValue({ keyPrefix: "mnfst_abc", apiKey: "mnfst_abc123" }),
-  getHealth: vi.fn().mockResolvedValue({ mode: "cloud" }),
+const psmProps: Array<Record<string, unknown>> = [];
+vi.mock('../../src/components/ProviderSelectModal.js', () => ({
+  default: (props: Record<string, unknown>) => {
+    psmProps.push({
+      agentName: props.agentName,
+      providersCount: (props.providers as { length: number })?.length ?? 0,
+      customProvidersCount: (props.customProviders as { length: number })?.length ?? 0,
+      customProviderPrefill: props.customProviderPrefill,
+      providerDeepLink: props.providerDeepLink,
+    });
+    return (
+      <div data-testid="provider-select-modal">
+        <button data-testid="psm-close" onClick={() => (props.onClose as () => void)()}>
+          close
+        </button>
+        <button
+          data-testid="psm-update"
+          onClick={() => (props.onUpdate as () => Promise<void>)?.()}
+        >
+          update
+        </button>
+      </div>
+    );
+  },
 }));
 
-import RoutingModals from "../../src/components/RoutingModals";
-import type { TierAssignment, AvailableModel, CustomProviderData, RoutingProvider } from "../../src/services/api.js";
+const kpmProps: Array<Record<string, unknown>> = [];
+vi.mock('../../src/components/KeyPickerModal.js', () => ({
+  default: (props: Record<string, unknown>) => {
+    kpmProps.push({
+      providerName: props.providerName,
+      modelName: props.modelName,
+      keysCount: (props.keys as { length: number })?.length ?? 0,
+    });
+    return (
+      <div data-testid="key-picker-modal">
+        <button
+          data-testid="kpm-pick-work"
+          onClick={() => (props.onPick as (label: string | null) => void)('Work')}
+        >
+          pick-work
+        </button>
+        <button
+          data-testid="kpm-pick-default"
+          onClick={() => (props.onPick as (label: string | null) => void)(null)}
+        >
+          pick-default
+        </button>
+        <button data-testid="kpm-close" onClick={() => (props.onClose as () => void)()}>
+          close
+        </button>
+      </div>
+    );
+  },
+}));
 
-const baseTiers: TierAssignment[] = [
-  { id: "1", user_id: "u1", tier: "simple", override_model: null, override_provider: null, auto_assigned_model: "gpt-4o-mini", fallback_models: null, updated_at: "2025-01-01" },
-  { id: "2", user_id: "u1", tier: "standard", override_model: null, override_provider: null, auto_assigned_model: null, fallback_models: null, updated_at: "2025-01-01" },
-  { id: "3", user_id: "u1", tier: "complex", override_model: null, override_provider: null, auto_assigned_model: null, fallback_models: null, updated_at: "2025-01-01" },
-  { id: "4", user_id: "u1", tier: "reasoning", override_model: null, override_provider: null, auto_assigned_model: null, fallback_models: null, updated_at: "2025-01-01" },
+const riProps: Array<Record<string, unknown>> = [];
+vi.mock('../../src/components/RoutingInstructionModal.js', () => ({
+  default: (props: Record<string, unknown>) => {
+    riProps.push({
+      open: props.open,
+      mode: props.mode,
+      agentName: props.agentName,
+      connectedProvider: props.connectedProvider,
+    });
+    return (
+      <div
+        data-testid={`instruction-modal-${(props.open as boolean) ? 'open' : 'closed'}-${props.mode as string}`}
+      >
+        <button data-testid="ri-close" onClick={() => (props.onClose as () => void)()}>
+          close
+        </button>
+      </div>
+    );
+  },
+}));
+
+import RoutingModals from '../../src/components/RoutingModals';
+import type {
+  TierAssignment,
+  AvailableModel,
+  CustomProviderData,
+  RoutingProvider,
+  SpecificityAssignment,
+} from '../../src/services/api';
+
+const sampleModels: AvailableModel[] = [
+  {
+    model_name: 'gpt-4o',
+    provider: 'openai',
+    auth_type: 'api_key',
+    input_price_per_token: 0,
+    output_price_per_token: 0,
+    context_window: 0,
+    capability_reasoning: false,
+    capability_code: false,
+    quality_score: 0,
+  },
+  {
+    model_name: 'gpt-4o',
+    provider: 'openai',
+    auth_type: 'subscription',
+    input_price_per_token: 0,
+    output_price_per_token: 0,
+    context_window: 0,
+    capability_reasoning: false,
+    capability_code: false,
+    quality_score: 0,
+  },
+  {
+    model_name: 'claude-opus',
+    provider: 'anthropic',
+    auth_type: 'api_key',
+    input_price_per_token: 0,
+    output_price_per_token: 0,
+    context_window: 0,
+    capability_reasoning: false,
+    capability_code: false,
+    quality_score: 0,
+  },
 ];
 
-const baseModels: AvailableModel[] = [
-  { model_name: "gpt-4o-mini", provider: "OpenAI", display_name: "GPT-4o Mini", input_price_per_token: 0.00000015, output_price_per_token: 0.0000006, context_window: 128000, capability_reasoning: false, capability_code: true },
-  { model_name: "claude-opus-4-6", provider: "Anthropic", display_name: "Claude Opus 4.6", input_price_per_token: 0.000015, output_price_per_token: 0.000075, context_window: 200000, capability_reasoning: true, capability_code: true },
+const tiers: TierAssignment[] = [
+  {
+    id: 't1',
+    agent_id: 'a',
+    tier: 'simple',
+    override_route: { provider: 'openai', authType: 'api_key', model: 'gpt-4o' },
+    auto_assigned_route: null,
+    fallback_routes: [{ provider: 'anthropic', authType: 'api_key', model: 'claude-opus' }],
+    updated_at: '2025-01-01',
+  },
 ];
 
-const baseProviders: RoutingProvider[] = [
-  { id: "p1", provider: "openai", auth_type: "api_key" as const, is_active: true, has_api_key: true, connected_at: "2025-01-01" },
+const specificityAssignments: SpecificityAssignment[] = [
+  {
+    id: 's1',
+    agent_id: 'a',
+    category: 'coding',
+    is_active: true,
+    override_route: null,
+    auto_assigned_route: null,
+    fallback_routes: null,
+    updated_at: '2025-01-01',
+  },
+  {
+    id: 's2',
+    agent_id: 'a',
+    category: 'trading',
+    is_active: false,
+    override_route: null,
+    auto_assigned_route: null,
+    fallback_routes: null,
+    updated_at: '2025-01-01',
+  },
 ];
 
-describe("RoutingModals", () => {
-  const defaultProps = () => {
-    const [dropdownTier] = createSignal<string | null>(null);
-    const [specificityDropdown] = createSignal<string | null>(null);
-    const [fallbackPickerTier] = createSignal<string | null>(null);
-    const [showProviderModal] = createSignal(false);
-    const [instructionModal] = createSignal<"enable" | "disable" | null>(null);
-    const [instructionProvider] = createSignal<string | null>(null);
-    const [confirmDisable] = createSignal(false);
-    const [disabling] = createSignal(false);
+const baseProps = {
+  agentName: () => 'demo',
+  onDropdownClose: vi.fn(),
+  onSpecificityDropdownClose: vi.fn(),
+  onSpecificityOverride: vi.fn(),
+  onFallbackPickerClose: vi.fn(),
+  onProviderModalClose: vi.fn(),
+  onInstructionClose: vi.fn(),
+  onProviderUpdate: vi.fn().mockResolvedValue(undefined),
+  onOpenProviderModal: vi.fn(),
+  models: () => sampleModels,
+  tiers: () => tiers,
+  specificityAssignments: () => specificityAssignments,
+  customProviders: () => [] as CustomProviderData[],
+  connectedProviders: () => [] as RoutingProvider[],
+  getTier: (id: string) => tiers.find((t) => t.tier === id),
+  onOverride: vi.fn(),
+  onAddFallback: vi.fn(),
+};
 
-    return {
-      agentName: () => "test-agent",
-      dropdownTier,
-      onDropdownClose: vi.fn(),
-      specificityDropdown,
-      onSpecificityDropdownClose: vi.fn(),
-      onSpecificityOverride: vi.fn(),
-      fallbackPickerTier,
-      onFallbackPickerClose: vi.fn(),
-      showProviderModal,
-      onProviderModalClose: vi.fn(),
-      instructionModal,
-      instructionProvider,
-      onInstructionClose: vi.fn(),
-      confirmDisable,
-      disabling,
-      onDisableCancel: vi.fn(),
-      onDisableConfirm: vi.fn().mockResolvedValue(undefined),
-      models: () => baseModels,
-      tiers: () => baseTiers,
-      customProviders: () => [] as CustomProviderData[],
-      connectedProviders: () => baseProviders,
-      getTier: (tierId: string) => baseTiers.find((t) => t.tier === tierId),
-      onOverride: vi.fn(),
-      onAddFallback: vi.fn(),
-      onProviderUpdate: vi.fn().mockResolvedValue(undefined),
-    };
-  };
+function makeProps(overrides: Partial<Parameters<typeof RoutingModals>[0]> = {}) {
+  return {
+    ...baseProps,
+    dropdownTier: () => null,
+    specificityDropdown: () => null,
+    fallbackPickerTier: () => null,
+    showProviderModal: () => false,
+    instructionModal: () => null,
+    instructionProvider: () => null,
+    ...overrides,
+  } as Parameters<typeof RoutingModals>[0];
+}
 
-  it("renders specificity dropdown modal when specificityDropdown is set", () => {
-    const [specificityDropdown] = createSignal<string | null>("coding");
-    const onSpecificityOverride = vi.fn();
-    const onSpecificityDropdownClose = vi.fn();
-
-    render(() => (
-      <RoutingModals
-        {...defaultProps()}
-        specificityDropdown={specificityDropdown}
-        onSpecificityDropdownClose={onSpecificityDropdownClose}
-        onSpecificityOverride={onSpecificityOverride}
-      />
-    ));
-
-    // The specificity dropdown opens a ModelPickerModal
-    expect(screen.getByText("Select a model")).toBeDefined();
+describe('RoutingModals', () => {
+  beforeEach(() => {
+    pickerCalls.length = 0;
+    psmProps.length = 0;
+    riProps.length = 0;
+    kpmProps.length = 0;
+    vi.clearAllMocks();
   });
 
-  it("does not render specificity dropdown modal when specificityDropdown is null", () => {
-    const [specificityDropdown] = createSignal<string | null>(null);
-
-    render(() => (
-      <RoutingModals
-        {...defaultProps()}
-        specificityDropdown={specificityDropdown}
-      />
+  it('renders the dropdown picker when dropdownTier is set', async () => {
+    // ModelPickerModal is lazy-loaded behind <Suspense>, so the picker mounts
+    // on a microtask — await it instead of asserting synchronously.
+    const { findByTestId } = render(() => (
+      <RoutingModals {...makeProps({ dropdownTier: () => 'simple' })} />
     ));
-
-    // No model picker should be open
-    expect(screen.queryByText("Select a model")).toBeNull();
+    expect(await findByTestId('picker-simple')).not.toBeNull();
   });
 
-  it("onSpecificityOverride callback is called with correct args when model is selected", async () => {
-    const [specificityDropdown] = createSignal<string | null>("coding");
-    const onSpecificityOverride = vi.fn();
-
+  it('requires stream-capable models for stream-mode tier pickers', () => {
     render(() => (
       <RoutingModals
-        {...defaultProps()}
-        specificityDropdown={specificityDropdown}
-        onSpecificityOverride={onSpecificityOverride}
+        {...makeProps({
+          dropdownTier: () => 'simple',
+          tiers: () => [{ ...tiers[0]!, response_mode: 'stream' }],
+          getTier: (id) =>
+            id === 'simple' ? { ...tiers[0]!, response_mode: 'stream' } : undefined,
+        })}
       />
     ));
+    expect(pickerCalls[0].requiredCapability).toBe('stream');
+  });
 
-    await screen.findByText("Select a model");
+  it('requires stream-capable models for stream-mode specificity pickers', () => {
+    render(() => (
+      <RoutingModals
+        {...makeProps({
+          specificityDropdown: () => 'coding',
+          specificityAssignments: () => [
+            { ...specificityAssignments[0]!, response_mode: 'stream' },
+          ],
+        })}
+      />
+    ));
+    expect(pickerCalls[0].requiredCapability).toBe('stream');
+  });
 
-    // Click on a model in the picker
-    const modelButtons = document.querySelectorAll<HTMLButtonElement>(".routing-modal__model");
-    expect(modelButtons.length).toBeGreaterThan(0);
-    fireEvent.click(modelButtons[0]);
+  it('forwards onDropdownClose when picker closes', () => {
+    const onDropdownClose = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals {...makeProps({ dropdownTier: () => 'simple', onDropdownClose })} />
+    ));
+    fireEvent.click(getByTestId('picker-close-simple'));
+    expect(onDropdownClose).toHaveBeenCalled();
+  });
 
-    await waitFor(() => {
-      expect(onSpecificityOverride).toHaveBeenCalled();
-      // First argument should be the category "coding"
-      expect(onSpecificityOverride.mock.calls[0][0]).toBe("coding");
-      // Second argument should be the model name
-      expect(typeof onSpecificityOverride.mock.calls[0][1]).toBe("string");
-      // Third argument should be the provider
-      expect(typeof onSpecificityOverride.mock.calls[0][2]).toBe("string");
+  it('calls onOverride when picker selects a model', () => {
+    const onOverride = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals {...makeProps({ dropdownTier: () => 'simple', onOverride })} />
+    ));
+    fireEvent.click(getByTestId('picker-simple'));
+    expect(onOverride).toHaveBeenCalledWith('simple', 'gpt-4o', 'openai', 'api_key');
+  });
+
+  it('opens specificity picker only filtered to active assignments', () => {
+    render(() => <RoutingModals {...makeProps({ specificityDropdown: () => 'coding' })} />);
+    // 1 active assignment → tiersCount === 1
+    expect(pickerCalls[0].tiersCount).toBe(1);
+  });
+
+  it('invokes onSpecificityOverride with the category, model, provider, and authType', () => {
+    const onSpecificityOverride = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals
+        {...makeProps({ specificityDropdown: () => 'coding', onSpecificityOverride })}
+      />
+    ));
+    fireEvent.click(getByTestId('picker-coding'));
+    expect(onSpecificityOverride).toHaveBeenCalledWith('coding', 'gpt-4o', 'openai', 'api_key');
+  });
+
+  describe('fallback picker filtering', () => {
+    it('filters out the primary route entry by full (model, provider, authType)', () => {
+      render(() => <RoutingModals {...makeProps({ fallbackPickerTier: () => 'simple' })} />);
+      // 3 sample models. Primary is gpt-4o on openai/api_key — that one filtered.
+      // Already-fallback claude-opus on anthropic/api_key — that one filtered.
+      // gpt-4o on openai/subscription should remain (different auth tuple).
+      const list = pickerCalls[0].modelsList as string[];
+      expect(list).toEqual(['gpt-4o:subscription']);
+    });
+
+    it('does NOT dedupe same model name on different authType', () => {
+      // The primary route is api_key. The subscription variant must remain.
+      render(() => <RoutingModals {...makeProps({ fallbackPickerTier: () => 'simple' })} />);
+      const list = pickerCalls[0].modelsList as string[];
+      expect(list).toContain('gpt-4o:subscription');
+    });
+
+    it('treats no-auth-type model rows as non-primary and non-fallback (kept in list)', () => {
+      const noAuthModels: AvailableModel[] = [
+        {
+          model_name: 'anonymous-model',
+          provider: 'openai',
+          input_price_per_token: 0,
+          output_price_per_token: 0,
+          context_window: 0,
+          capability_reasoning: false,
+          capability_code: false,
+          quality_score: 0,
+        },
+      ];
+      render(() => (
+        <RoutingModals
+          {...makeProps({
+            fallbackPickerTier: () => 'simple',
+            models: () => noAuthModels,
+          })}
+        />
+      ));
+      expect((pickerCalls[0].modelsList as string[])[0]).toBe('anonymous-model:');
+    });
+
+    it('requires stream-capable models for stream-mode fallback pickers', () => {
+      render(() => (
+        <RoutingModals
+          {...makeProps({
+            fallbackPickerTier: () => 'simple',
+            tiers: () => [{ ...tiers[0]!, response_mode: 'stream' }],
+            getTier: (id: string) =>
+              id === 'simple' ? { ...tiers[0]!, response_mode: 'stream' } : undefined,
+          })}
+        />
+      ));
+      expect(pickerCalls[0].requiredCapability).toBe('stream');
+      expect(typeof pickerCalls[0].providerRefreshed).toBe('function');
     });
   });
 
-  it("calls onSpecificityDropdownClose when specificity modal close is clicked", async () => {
-    const [specificityDropdown] = createSignal<string | null>("coding");
-    const onSpecificityDropdownClose = vi.fn();
-
-    render(() => (
+  it('forwards onFallbackPickerClose when the fallback picker closes', () => {
+    const onFallbackPickerClose = vi.fn();
+    const { getByTestId } = render(() => (
       <RoutingModals
-        {...defaultProps()}
-        specificityDropdown={specificityDropdown}
-        onSpecificityDropdownClose={onSpecificityDropdownClose}
+        {...makeProps({
+          fallbackPickerTier: () => 'simple',
+          onFallbackPickerClose,
+        })}
       />
     ));
-
-    await screen.findByText("Select a model");
-
-    // Close the modal
-    const closeBtns = screen.getAllByLabelText("Close");
-    fireEvent.click(closeBtns[closeBtns.length - 1]);
-
-    expect(onSpecificityDropdownClose).toHaveBeenCalled();
+    fireEvent.click(getByTestId('picker-close-simple'));
+    expect(onFallbackPickerClose).toHaveBeenCalled();
   });
 
-  it("fallback picker uses getTier to resolve specificity assignment fallbacks", () => {
-    const specificityAssignment = {
-      ...baseTiers[0],
-      tier: "coding",
-      category: "coding",
-      auto_assigned_model: "claude-opus-4-6",
-      override_model: null,
-      fallback_models: ["gpt-4o-mini"],
-    };
+  // ProviderSelectModal was removed from RoutingModals on this branch —
+  // provider connection now happens via the dedicated sidebar provider pages,
+  // not from an in-routing modal. RoutingModals still accepts the (now inert)
+  // showProviderModal / customProviderPrefill / providerDeepLink props for
+  // backward compatibility, but never mounts the modal.
+  it('does not render ProviderSelectModal when showProviderModal is false', () => {
+    const { queryByTestId } = render(() => (
+      <RoutingModals {...makeProps({ showProviderModal: () => false })} />
+    ));
+    expect(queryByTestId('provider-select-modal')).toBeNull();
+  });
 
-    const [fallbackPickerTier] = createSignal<string | null>("coding");
+  it('still does not render ProviderSelectModal even when showProviderModal is true', async () => {
+    const { queryByTestId } = render(() => (
+      <RoutingModals {...makeProps({ showProviderModal: () => true })} />
+    ));
+    // Give any lazy/Suspense boundary a chance to flush — the modal must stay
+    // absent because it was removed from this component.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(queryByTestId('provider-select-modal')).toBeNull();
+    // The ProviderSelectModal mock is never invoked.
+    expect(psmProps.length).toBe(0);
+  });
 
-    render(() => (
+  it("renders the instruction modal in the open state when instructionModal returns 'enable'", () => {
+    const { getByTestId } = render(() => (
+      <RoutingModals {...makeProps({ instructionModal: () => 'enable' })} />
+    ));
+    expect(getByTestId('instruction-modal-open-enable')).not.toBeNull();
+  });
+
+  it('renders the instruction modal in the closed state when instructionModal returns null', () => {
+    const { queryByTestId } = render(() => (
+      <RoutingModals {...makeProps({ instructionModal: () => null })} />
+    ));
+    expect(queryByTestId('instruction-modal-closed-enable')).not.toBeNull();
+  });
+
+  it('forwards onConnectProviders from the dropdown picker through to onOpenProviderModal', () => {
+    const onOpenProviderModal = vi.fn();
+    const onDropdownClose = vi.fn();
+    const { getByTestId } = render(() => (
       <RoutingModals
-        {...defaultProps()}
-        fallbackPickerTier={fallbackPickerTier}
-        getTier={(tierId: string) => {
-          if (tierId === "coding") return specificityAssignment as any;
-          return baseTiers.find((t) => t.tier === tierId);
-        }}
+        {...makeProps({
+          dropdownTier: () => 'simple',
+          onOpenProviderModal,
+          onDropdownClose,
+        })}
       />
     ));
+    fireEvent.click(getByTestId('picker-connect-simple'));
+    expect(onDropdownClose).toHaveBeenCalled();
+    expect(onOpenProviderModal).toHaveBeenCalled();
+  });
 
-    // The model picker for fallback should open
-    expect(screen.getByText("Select a model")).toBeDefined();
+  it('forwards onConnectProviders from the fallback picker through to onOpenProviderModal', () => {
+    const onOpenProviderModal = vi.fn();
+    const onFallbackPickerClose = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals
+        {...makeProps({
+          fallbackPickerTier: () => 'simple',
+          onOpenProviderModal,
+          onFallbackPickerClose,
+        })}
+      />
+    ));
+    fireEvent.click(getByTestId('picker-connect-simple'));
+    expect(onFallbackPickerClose).toHaveBeenCalled();
+    expect(onOpenProviderModal).toHaveBeenCalled();
+  });
 
-    // Models should be filtered: claude-opus-4-6 (primary) and gpt-4o-mini (existing fallback) excluded
-    const modalButtons = document.querySelectorAll<HTMLButtonElement>(".routing-modal__model");
-    expect(modalButtons.length).toBe(0);
+  it('forwards onConnectProviders from the specificity picker through to onOpenProviderModal', () => {
+    const onOpenProviderModal = vi.fn();
+    const onSpecificityDropdownClose = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals
+        {...makeProps({
+          specificityDropdown: () => 'coding',
+          onOpenProviderModal,
+          onSpecificityDropdownClose,
+        })}
+      />
+    ));
+    fireEvent.click(getByTestId('picker-connect-coding'));
+    expect(onSpecificityDropdownClose).toHaveBeenCalled();
+    expect(onOpenProviderModal).toHaveBeenCalled();
+  });
+
+  it('calls onAddFallback when fallback picker selects a model', () => {
+    const onAddFallback = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals {...makeProps({ fallbackPickerTier: () => 'simple', onAddFallback })} />
+    ));
+    fireEvent.click(getByTestId('picker-simple'));
+    expect(onAddFallback).toHaveBeenCalledWith('simple', 'gpt-4o', 'openai', 'api_key');
+  });
+
+  it('renders RoutingInstructionModal with the provider name from the accessor', () => {
+    render(() => (
+      <RoutingModals
+        {...makeProps({
+          instructionModal: () => 'disable',
+          instructionProvider: () => 'openai',
+        })}
+      />
+    ));
+    const last = riProps[riProps.length - 1];
+    expect(last.open).toBe(true);
+    expect(last.mode).toBe('disable');
+    expect(last.connectedProvider).toBe('openai');
+  });
+
+  it("falls back to mode='enable' when instructionModal returns null", () => {
+    render(() => <RoutingModals {...makeProps({ instructionModal: () => null })} />);
+    const last = riProps[riProps.length - 1];
+    expect(last.open).toBe(false);
+    expect(last.mode).toBe('enable');
+  });
+
+  it('invokes onInstructionClose when the instruction modal closes', () => {
+    const onInstructionClose = vi.fn();
+    const { getByTestId } = render(() => (
+      <RoutingModals {...makeProps({ instructionModal: () => 'enable', onInstructionClose })} />
+    ));
+    fireEvent.click(getByTestId('ri-close'));
+    expect(onInstructionClose).toHaveBeenCalled();
+  });
+
+  describe('KeyPickerModal flow (multi-key override)', () => {
+    const multiKeyProviders: RoutingProvider[] = [
+      {
+        id: 'p1',
+        provider: 'openai',
+        auth_type: 'api_key',
+        is_active: true,
+        has_api_key: true,
+        label: 'Work',
+        priority: 0,
+        connected_at: '2025-01-01',
+      },
+      {
+        id: 'p2',
+        provider: 'openai',
+        auth_type: 'api_key',
+        is_active: true,
+        has_api_key: true,
+        label: 'Personal',
+        priority: 1,
+        connected_at: '2025-01-01',
+      },
+    ];
+
+    it('opens the key picker (instead of overriding) when 2+ keys match the selection', () => {
+      const onOverride = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            dropdownTier: () => 'simple',
+            connectedProviders: () => multiKeyProviders,
+            onOverride,
+          })}
+        />
+      ));
+      fireEvent.click(getByTestId('picker-simple'));
+      // onOverride is deferred — KeyPickerModal renders.
+      expect(onOverride).not.toHaveBeenCalled();
+      expect(queryByTestId('key-picker-modal')).not.toBeNull();
+      expect(kpmProps[kpmProps.length - 1].keysCount).toBe(2);
+    });
+
+    it('forwards the picked label to onOverride and closes the picker', () => {
+      const onOverride = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            dropdownTier: () => 'simple',
+            connectedProviders: () => multiKeyProviders,
+            onOverride,
+          })}
+        />
+      ));
+      fireEvent.click(getByTestId('picker-simple'));
+      fireEvent.click(getByTestId('kpm-pick-work'));
+      expect(onOverride).toHaveBeenCalledWith('simple', 'gpt-4o', 'openai', 'api_key', 'Work');
+      expect(queryByTestId('key-picker-modal')).toBeNull();
+    });
+
+    it("forwards null label as 'use default' to onOverride", () => {
+      const onOverride = vi.fn();
+      const { getByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            dropdownTier: () => 'simple',
+            connectedProviders: () => multiKeyProviders,
+            onOverride,
+          })}
+        />
+      ));
+      fireEvent.click(getByTestId('picker-simple'));
+      fireEvent.click(getByTestId('kpm-pick-default'));
+      expect(onOverride).toHaveBeenCalledWith('simple', 'gpt-4o', 'openai', 'api_key', undefined);
+    });
+
+    it('opens the key picker via the fallback flow and forwards the label to onAddFallback', () => {
+      // Use a tier where the primary is a *different* model so neither key
+      // is "implicitly used" — both Work and Personal stay available, and
+      // handleFallbackSelect routes through the multi-key picker.
+      const tierWithDifferentPrimary: TierAssignment = {
+        ...tiers[0]!,
+        override_route: {
+          provider: 'anthropic',
+          authType: 'api_key',
+          model: 'claude-opus',
+        },
+        fallback_routes: [],
+      };
+      const onAddFallback = vi.fn();
+      const onFallbackPickerClose = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            fallbackPickerTier: () => 'simple',
+            tiers: () => [tierWithDifferentPrimary],
+            getTier: (id: string) => [tierWithDifferentPrimary].find((t) => t.tier === id),
+            connectedProviders: () => multiKeyProviders,
+            onAddFallback,
+            onFallbackPickerClose,
+          })}
+        />
+      ));
+      // Fallback picker fires onSelect → multi-key path → KeyPickerModal opens.
+      fireEvent.click(getByTestId('picker-simple'));
+      expect(queryByTestId('key-picker-modal')).not.toBeNull();
+      // Pick a label — the fallback path closes the fallback picker first
+      // (so used-key filtering refreshes on next open) and forwards the label.
+      fireEvent.click(getByTestId('kpm-pick-work'));
+      expect(onFallbackPickerClose).toHaveBeenCalled();
+      expect(onAddFallback).toHaveBeenCalledWith('simple', 'gpt-4o', 'openai', 'api_key', 'Work');
+    });
+
+    it('auto-selects the only remaining key (no picker shown) when one is filtered out by usage', () => {
+      // The primary already pins "Work" — used-key filtering removes "Work"
+      // from the available list, leaving only "Personal" → auto-select.
+      const tierWithKeyPin: TierAssignment = {
+        ...tiers[0]!,
+        override_route: {
+          provider: 'openai',
+          authType: 'api_key',
+          model: 'gpt-4o',
+          keyLabel: 'Work',
+        },
+      };
+      const onAddFallback = vi.fn();
+      const onFallbackPickerClose = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            fallbackPickerTier: () => 'simple',
+            tiers: () => [tierWithKeyPin],
+            getTier: (id: string) => [tierWithKeyPin].find((t) => t.tier === id),
+            connectedProviders: () => multiKeyProviders,
+            onAddFallback,
+            onFallbackPickerClose,
+          })}
+        />
+      ));
+      fireEvent.click(getByTestId('picker-simple'));
+      expect(queryByTestId('key-picker-modal')).toBeNull();
+      expect(onFallbackPickerClose).toHaveBeenCalled();
+      expect(onAddFallback).toHaveBeenCalledWith(
+        'simple',
+        'gpt-4o',
+        'openai',
+        'api_key',
+        'Personal',
+      );
+    });
+
+    it('does nothing if a stale fallback selection has no available keys left', () => {
+      const tierWithEveryKeyUsed: TierAssignment = {
+        ...tiers[0]!,
+        override_route: {
+          provider: 'openai',
+          authType: 'api_key',
+          model: 'gpt-4o',
+          keyLabel: 'Work',
+        },
+        fallback_routes: [
+          { provider: 'openai', authType: 'api_key', model: 'gpt-4o', keyLabel: 'Personal' },
+        ],
+      };
+      const onAddFallback = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            fallbackPickerTier: () => 'simple',
+            tiers: () => [tierWithEveryKeyUsed],
+            getTier: (id: string) => [tierWithEveryKeyUsed].find((t) => t.tier === id),
+            connectedProviders: () => multiKeyProviders,
+            onAddFallback,
+          })}
+        />
+      ));
+
+      fireEvent.click(getByTestId('picker-simple'));
+
+      expect(onAddFallback).not.toHaveBeenCalled();
+      expect(queryByTestId('key-picker-modal')).toBeNull();
+    });
+
+    it('closes the picker without calling onOverride when the user cancels', () => {
+      const onOverride = vi.fn();
+      const { getByTestId, queryByTestId } = render(() => (
+        <RoutingModals
+          {...makeProps({
+            dropdownTier: () => 'simple',
+            connectedProviders: () => multiKeyProviders,
+            onOverride,
+          })}
+        />
+      ));
+      fireEvent.click(getByTestId('picker-simple'));
+      fireEvent.click(getByTestId('kpm-close'));
+      expect(onOverride).not.toHaveBeenCalled();
+      expect(queryByTestId('key-picker-modal')).toBeNull();
+    });
+  });
+
+  it('accepts customProviderPrefill and providerDeepLink props without rendering a provider modal', () => {
+    const customProviderPrefill = () => ({ name: 'MyProv', baseUrl: 'https://x' });
+    const providerDeepLink = () => ({ providerId: 'openai' });
+    const { queryByTestId } = render(() => (
+      <RoutingModals
+        {...makeProps({
+          showProviderModal: () => true,
+          customProviderPrefill,
+          providerDeepLink,
+        })}
+      />
+    ));
+    // These props are now inert — RoutingModals no longer forwards them to a
+    // ProviderSelectModal because that modal was removed from this component.
+    expect(queryByTestId('provider-select-modal')).toBeNull();
+    expect(psmProps.length).toBe(0);
   });
 });

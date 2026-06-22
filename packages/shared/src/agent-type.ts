@@ -1,10 +1,15 @@
-export const AGENT_CATEGORIES = ['personal', 'app'] as const;
+export const AGENT_CATEGORIES = ['personal', 'app', 'coding'] as const;
 export type AgentCategory = (typeof AGENT_CATEGORIES)[number];
 
 export const AGENT_PLATFORMS = [
   'openclaw',
   'hermes',
+  'nanobot',
+  'craft',
+  'claude-code',
+  'opencode',
   'openai-sdk',
+  'anthropic-sdk',
   'vercel-ai-sdk',
   'langchain',
   'curl',
@@ -13,14 +18,20 @@ export const AGENT_PLATFORMS = [
 export type AgentPlatform = (typeof AGENT_PLATFORMS)[number];
 
 export const CATEGORY_LABELS: Readonly<Record<AgentCategory, string>> = {
-  personal: 'Personal AI Agent',
+  personal: 'AI agents',
   app: 'App AI SDK',
+  coding: 'Coding Assistant',
 };
 
 export const PLATFORM_LABELS: Readonly<Record<AgentPlatform, string>> = {
   openclaw: 'OpenClaw',
   hermes: 'Hermes Agent',
+  nanobot: 'Nanobot',
+  craft: 'Craft Agent',
+  'claude-code': 'Claude Code',
+  opencode: 'OpenCode',
   'openai-sdk': 'OpenAI SDK',
+  'anthropic-sdk': 'Anthropic SDK',
   'vercel-ai-sdk': 'Vercel AI SDK',
   langchain: 'LangChain',
   curl: 'cURL',
@@ -28,16 +39,22 @@ export const PLATFORM_LABELS: Readonly<Record<AgentPlatform, string>> = {
 };
 
 export const PLATFORMS_BY_CATEGORY: Readonly<Record<AgentCategory, readonly AgentPlatform[]>> = {
-  personal: ['openclaw', 'hermes', 'other'],
-  app: ['openai-sdk', 'vercel-ai-sdk', 'langchain', 'other'],
+  personal: ['openclaw', 'hermes', 'nanobot', 'craft', 'other'],
+  app: ['openai-sdk', 'anthropic-sdk', 'vercel-ai-sdk', 'langchain', 'other'],
+  coding: ['claude-code', 'opencode', 'other'],
 };
 
 export const PLATFORM_ICONS: Readonly<Partial<Record<AgentPlatform, string>>> = {
-  openclaw: '/icons/openclaw.png',
-  hermes: '/icons/hermes.png',
+  openclaw: '/icons/openclaw.svg',
+  hermes: '/icons/hermes.svg',
+  nanobot: '/icons/nanobot.png',
+  craft: '/icons/craft.png',
+  'claude-code': '/icons/providers/claude-code.svg',
+  opencode: '/icons/providers/opencode.svg',
   'openai-sdk': '/icons/providers/openai.svg',
+  'anthropic-sdk': '/icons/providers/anthropic.svg',
   'vercel-ai-sdk': '/icons/vercel.svg',
-  langchain: '/icons/langchain.png',
+  langchain: '/icons/langchain.svg',
   other: '/icons/other.svg',
 };
 
@@ -49,5 +66,8 @@ export function platformIcon(
   if (platform === 'other') {
     return category === 'personal' ? '/icons/other-agent.svg' : '/icons/other.svg';
   }
+  // Object.hasOwn so a hostile string like "__proto__" or "constructor" can't
+  // resolve to a value on Object.prototype.
+  if (!Object.hasOwn(PLATFORM_ICONS, platform)) return undefined;
   return PLATFORM_ICONS[platform as AgentPlatform];
 }

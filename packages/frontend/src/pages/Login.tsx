@@ -1,8 +1,9 @@
 import { A, useSearchParams } from '@solidjs/router';
 import { Title, Meta } from '@solidjs/meta';
-import { type Component, createSignal, onMount, Show } from 'solid-js';
+import { type Component, createSignal, createUniqueId, onCleanup, onMount, Show } from 'solid-js';
 import SocialButtons from '../components/SocialButtons.jsx';
 import { authClient } from '../services/auth-client.js';
+import { getLastAuthMethod, setLastAuthMethod } from '../services/last-auth-method.js';
 import { checkSocialProviders } from '../services/setup-status.js';
 
 const RESEND_COOLDOWN_SECONDS = 60;
@@ -15,7 +16,11 @@ const Login: Component = () => {
   const [needsVerification, setNeedsVerification] = createSignal(false);
   const [resendCooldown, setResendCooldown] = createSignal(0);
   const [socialProviders, setSocialProviders] = createSignal<string[]>([]);
+  const [lastAuthMethod] = createSignal(getLastAuthMethod());
   const [searchParams] = useSearchParams();
+  const emailId = createUniqueId();
+  const passwordId = createUniqueId();
+  const errorId = createUniqueId();
 
   onMount(async () => {
     if (searchParams.error) {
@@ -24,18 +29,26 @@ const Login: Component = () => {
     setSocialProviders(await checkSocialProviders());
   });
 
+  let cooldownInterval: ReturnType<typeof setInterval> | undefined;
+
   const startCooldown = () => {
     setResendCooldown(RESEND_COOLDOWN_SECONDS);
-    const interval = setInterval(() => {
+    if (cooldownInterval) clearInterval(cooldownInterval);
+    cooldownInterval = setInterval(() => {
       setResendCooldown((prev) => {
         if (prev <= 1) {
-          clearInterval(interval);
+          clearInterval(cooldownInterval);
+          cooldownInterval = undefined;
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
   };
+
+  onCleanup(() => {
+    if (cooldownInterval) clearInterval(cooldownInterval);
+  });
 
   const handleSubmit = async (e: Event) => {
     e.preventDefault();
@@ -64,6 +77,7 @@ const Login: Component = () => {
       return;
     }
 
+    setLastAuthMethod('email');
     window.location.href = '/';
   };
 
@@ -87,13 +101,13 @@ const Login: Component = () => {
   return (
     <>
       <Title>Sign In - Manifest</Title>
-      <Meta name="description" content="Sign in to Manifest to monitor your AI agents." />
+      <Meta name="description" content="Sign in to Manifest to monitor your AI harnesses." />
       <div class="auth-header">
         <h1 class="auth-header__title">Welcome back</h1>
-        <p class="auth-header__subtitle">Take control of your AI agent costs</p>
+        <p class="auth-header__subtitle">Take control of your AI harness costs</p>
       </div>
 
-      <SocialButtons enabledProviders={socialProviders()} />
+      <SocialButtons enabledProviders={socialProviders()} lastUsed={lastAuthMethod()} />
 
       <Show when={socialProviders().length > 0}>
         <div class="auth-divider">
@@ -103,7 +117,7 @@ const Login: Component = () => {
 
       <form class="auth-form" onSubmit={handleSubmit}>
         {error() && (
-          <div class="auth-form__error" role="alert">
+          <div id={errorId} class="auth-form__error" role="alert">
             {error()}
           </div>
         )}
@@ -117,26 +131,33 @@ const Login: Component = () => {
             {resendCooldown() > 0 ? `Resend in ${resendCooldown()}s` : 'Resend verification email'}
           </button>
         </Show>
-        <label class="auth-form__label">
+        <label class="auth-form__label" for={emailId}>
           Email
           <input
+            ref={(el) => requestAnimationFrame(() => el.focus())}
+            id={emailId}
             class="auth-form__input"
             type="email"
+            autocomplete="email"
             placeholder="you@example.com"
             value={email()}
             onInput={(e) => setEmail(e.currentTarget.value)}
             required
+            aria-describedby={error() ? errorId : undefined}
           />
         </label>
-        <label class="auth-form__label">
+        <label class="auth-form__label" for={passwordId}>
           Password
           <input
+            id={passwordId}
             class="auth-form__input"
             type="password"
+            autocomplete="current-password"
             placeholder="Enter your password"
             value={password()}
             onInput={(e) => setPassword(e.currentTarget.value)}
             required
+            aria-describedby={error() ? errorId : undefined}
           />
         </label>
         <div class="auth-form__actions">

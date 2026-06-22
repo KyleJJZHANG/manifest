@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ProviderController } from './provider.controller';
 import { ProviderService } from './routing-core/provider.service';
 import { ResolveAgentService } from './routing-core/resolve-agent.service';
@@ -8,9 +8,10 @@ import { OllamaSyncService } from '../database/ollama-sync.service';
 import { PricingSyncService } from '../database/pricing-sync.service';
 import { Agent } from '../entities/agent.entity';
 
-const mockUser = { id: 'user-1' } as never;
+const mockCtx = { tenantId: 'tenant-1', userId: 'user-1' } as never;
 const mockAgentName = { agentName: 'test-agent' } as never;
 const TEST_AGENT_ID = 'agent-001';
+const TEST_TENANT_ID = 'tenant-1';
 
 describe('ProviderController', () => {
   let controller: ProviderController;
@@ -27,8 +28,11 @@ describe('ProviderController', () => {
       getProviders: jest.fn().mockResolvedValue([]),
       upsertProvider: jest.fn().mockResolvedValue({ provider: {}, isNew: false }),
       removeProvider: jest.fn().mockResolvedValue({ notifications: 0 }),
+      renameKey: jest.fn(),
+      reorderKeys: jest.fn(),
       deactivateAllProviders: jest.fn().mockResolvedValue(undefined),
       recalculateTiers: jest.fn().mockResolvedValue(undefined),
+      recalculateTiersForTenant: jest.fn().mockResolvedValue(undefined),
     };
     mockDiscoveryService = {
       discoverModels: jest.fn().mockResolvedValue([]),
@@ -37,7 +41,11 @@ describe('ProviderController', () => {
       sync: jest.fn().mockResolvedValue({ count: 0 }),
     };
     mockResolveAgent = {
-      resolve: jest.fn().mockResolvedValue({ id: TEST_AGENT_ID, name: 'test-agent' } as Agent),
+      resolve: jest.fn().mockResolvedValue({
+        id: TEST_AGENT_ID,
+        name: 'test-agent',
+        tenant_id: TEST_TENANT_ID,
+      } as Agent),
     };
     mockTierService = {
       hasRoutableTier: jest.fn().mockResolvedValue(true),
@@ -56,6 +64,18 @@ describe('ProviderController', () => {
     );
   });
 
+  describe('upsertProvider region validation', () => {
+    it('rejects an invalid Qwen region on connect', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'qwen',
+          authType: 'api_key',
+          region: 'mars',
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
   /* ── getStatus ── */
 
   describe('getStatus', () => {
@@ -65,7 +85,7 @@ describe('ProviderController', () => {
       ]);
       mockTierService.hasRoutableTier.mockResolvedValue(true);
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: true, reason: null });
     });
 
@@ -74,7 +94,7 @@ describe('ProviderController', () => {
         { id: 'p1', provider: 'openai', is_active: false },
       ]);
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: false, reason: 'no_provider' });
       expect(mockTierService.hasRoutableTier).not.toHaveBeenCalled();
     });
@@ -82,7 +102,7 @@ describe('ProviderController', () => {
     it('returns no_provider when no providers exist', async () => {
       mockProviderService.getProviders.mockResolvedValue([]);
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: false, reason: 'no_provider' });
     });
 
@@ -93,7 +113,7 @@ describe('ProviderController', () => {
       ]);
       mockTierService.hasRoutableTier.mockResolvedValue(true);
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: true, reason: null });
     });
 
@@ -104,7 +124,7 @@ describe('ProviderController', () => {
       mockTierService.hasRoutableTier.mockResolvedValue(false);
       mockPricingSync.getAll.mockReturnValue(new Map([['gpt-4', {}]]));
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: false, reason: 'no_routable_models' });
     });
 
@@ -115,7 +135,7 @@ describe('ProviderController', () => {
       mockTierService.hasRoutableTier.mockResolvedValue(false);
       mockPricingSync.getAll.mockReturnValue(new Map());
 
-      const result = await controller.getStatus(mockUser, mockAgentName);
+      const result = await controller.getStatus(mockCtx, mockAgentName);
       expect(result).toEqual({ enabled: false, reason: 'pricing_cache_empty' });
     });
   });
@@ -132,12 +152,14 @@ describe('ProviderController', () => {
           connected_at: '2025-01-01',
           api_key_encrypted: 'enc',
           key_prefix: 'sk-proj-',
+          models_fetched_at: '2026-04-01T10:00:00.000Z',
+          cached_models: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }],
         },
       ]);
 
-      const result = await controller.getProviders(mockUser, mockAgentName);
+      const result = await controller.getProviders(mockCtx, mockAgentName);
 
-      expect(mockProviderService.getProviders).toHaveBeenCalledWith(TEST_AGENT_ID);
+      expect(mockProviderService.getProviders).toHaveBeenCalledWith('tenant-1');
       expect(result).toEqual([
         {
           id: 'p1',
@@ -148,8 +170,27 @@ describe('ProviderController', () => {
           key_prefix: 'sk-proj-',
           region: null,
           connected_at: '2025-01-01',
+          models_fetched_at: '2026-04-01T10:00:00.000Z',
+          cached_model_count: 2,
         },
       ]);
+    });
+
+    it('returns null models_fetched_at and zero cached_model_count when never discovered', async () => {
+      mockProviderService.getProviders.mockResolvedValue([
+        {
+          id: 'p1',
+          provider: 'anthropic',
+          is_active: true,
+          connected_at: '2025-01-01',
+          api_key_encrypted: 'enc',
+          key_prefix: 'sk-ant-',
+        },
+      ]);
+
+      const result = await controller.getProviders(mockCtx, mockAgentName);
+      expect(result[0].models_fetched_at).toBeNull();
+      expect(result[0].cached_model_count).toBe(0);
     });
 
     it('should strip internal fields from response', async () => {
@@ -165,7 +206,7 @@ describe('ProviderController', () => {
         },
       ]);
 
-      const result = await controller.getProviders(mockUser, mockAgentName);
+      const result = await controller.getProviders(mockCtx, mockAgentName);
 
       expect(result[0]).not.toHaveProperty('api_key_encrypted');
       expect(result[0]).not.toHaveProperty('agent_id');
@@ -184,13 +225,13 @@ describe('ProviderController', () => {
         },
       ]);
 
-      const result = await controller.getProviders(mockUser, mockAgentName);
+      const result = await controller.getProviders(mockCtx, mockAgentName);
       expect(result[0].key_prefix).toBeNull();
       expect(result[0].has_api_key).toBe(false);
     });
 
     it('should return empty array when no providers', async () => {
-      const result = await controller.getProviders(mockUser, mockAgentName);
+      const result = await controller.getProviders(mockCtx, mockAgentName);
       expect(result).toEqual([]);
     });
   });
@@ -204,24 +245,28 @@ describe('ProviderController', () => {
         isNew: true,
       });
 
-      const result = await controller.upsertProvider(mockUser, mockAgentName, {
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'anthropic',
         apiKey: 'sk-ant-test',
       });
 
       expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
         TEST_AGENT_ID,
-        'user-1',
+        'tenant-1',
         'anthropic',
         'sk-ant-test',
         undefined,
         undefined,
+        undefined,
+        'user-1',
       );
       expect(result).toEqual({
         id: 'p1',
         provider: 'anthropic',
         auth_type: 'api_key',
         is_active: true,
+        label: undefined,
+        priority: undefined,
         region: null,
       });
     });
@@ -232,23 +277,27 @@ describe('ProviderController', () => {
         isNew: false,
       });
 
-      const result = await controller.upsertProvider(mockUser, mockAgentName, {
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'openai',
       });
 
       expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
         TEST_AGENT_ID,
-        'user-1',
+        'tenant-1',
         'openai',
         undefined,
         undefined,
         undefined,
+        undefined,
+        'user-1',
       );
       expect(result).toEqual({
         id: 'p1',
         provider: 'openai',
         auth_type: 'api_key',
         is_active: true,
+        label: undefined,
+        priority: undefined,
         region: null,
       });
     });
@@ -260,7 +309,7 @@ describe('ProviderController', () => {
         isNew: false,
       });
 
-      await controller.upsertProvider(mockUser, mockAgentName, {
+      await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'openai',
         apiKey: 'sk-test',
       });
@@ -268,19 +317,42 @@ describe('ProviderController', () => {
       expect(mockDiscoveryService.discoverModels).toHaveBeenCalledWith(providerResult);
     });
 
-    it('should call recalculateTiers after discovery in upsertProvider', async () => {
+    it('discovers models without routing agents when the provider is new', async () => {
+      // A brand-new provider is global + ON for every owned agent, but routes
+      // remain user-controlled after discovery.
       const providerResult = { id: 'p1', provider: 'openai', is_active: true };
       mockProviderService.upsertProvider.mockResolvedValue({
         provider: providerResult,
         isNew: true,
       });
 
-      await controller.upsertProvider(mockUser, mockAgentName, {
+      await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'openai',
         apiKey: 'sk-test',
       });
 
-      expect(mockProviderService.recalculateTiers).toHaveBeenCalledWith(TEST_AGENT_ID);
+      expect(mockDiscoveryService.discoverModels).toHaveBeenCalledWith(providerResult);
+      expect(mockProviderService.recalculateTiersForTenant).not.toHaveBeenCalled();
+      expect(mockProviderService.recalculateTiers).not.toHaveBeenCalled();
+    });
+
+    it('discovers models without routing agents on an existing-row reconnect', async () => {
+      // Reconnecting an existing provider row still preserves each sibling
+      // agent's per-agent disable state.
+      const providerResult = { id: 'p1', provider: 'openai', is_active: true };
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: providerResult,
+        isNew: false,
+      });
+
+      await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'openai',
+        apiKey: 'sk-test',
+      });
+
+      expect(mockDiscoveryService.discoverModels).toHaveBeenCalledWith(providerResult);
+      expect(mockProviderService.recalculateTiers).not.toHaveBeenCalled();
+      expect(mockProviderService.recalculateTiersForTenant).not.toHaveBeenCalled();
     });
 
     it('should swallow discovery errors silently', async () => {
@@ -291,7 +363,7 @@ describe('ProviderController', () => {
       });
       mockDiscoveryService.discoverModels.mockRejectedValue(new Error('fetch failed'));
 
-      const result = await controller.upsertProvider(mockUser, mockAgentName, {
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'openai',
         apiKey: 'sk-test',
       });
@@ -319,7 +391,7 @@ describe('ProviderController', () => {
         isNew: true,
       });
 
-      const result = await controller.upsertProvider(mockUser, mockAgentName, {
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
         provider: 'openai',
         apiKey: 'sk-test',
       });
@@ -341,10 +413,227 @@ describe('ProviderController', () => {
         isNew: true,
       });
 
-      await controller.upsertProvider(mockUser, mockAgentName, { provider: 'ollama' });
+      await controller.upsertProvider(mockCtx, mockAgentName, { provider: 'ollama' });
 
       expect(mockOllamaSync.sync).toHaveBeenCalled();
       expect(mockProviderService.upsertProvider).toHaveBeenCalled();
+    });
+
+    it('should accept region=cn for MiniMax subscription', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'minimax',
+          is_active: true,
+          auth_type: 'subscription',
+          region: 'cn',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'minimax',
+        apiKey: 'sk-cp-abc123',
+        authType: 'subscription',
+        region: 'cn',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'minimax',
+        'sk-cp-abc123',
+        'subscription',
+        'cn',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('cn');
+    });
+
+    it('should reject invalid MiniMax subscription region', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'minimax',
+          apiKey: 'sk-cp-abc',
+          authType: 'subscription',
+          region: 'us-east',
+        }),
+      ).rejects.toThrow('MiniMax subscription region must be one of: global, cn');
+    });
+
+    it('should accept region=ams for Xiaomi MiMo Token Plan subscription', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'xiaomi',
+          is_active: true,
+          auth_type: 'subscription',
+          region: 'ams',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'xiaomi',
+        apiKey: 'tp-mimo-token',
+        authType: 'subscription',
+        region: 'ams',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'xiaomi',
+        'tp-mimo-token',
+        'subscription',
+        'ams',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('ams');
+    });
+
+    it('should reject invalid Xiaomi MiMo Token Plan subscription region', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'xiaomi',
+          apiKey: 'tp-mimo-token',
+          authType: 'subscription',
+          region: 'global',
+        }),
+      ).rejects.toThrow('Xiaomi MiMo Token Plan region must be one of: cn, sgp, ams');
+    });
+
+    it('should accept region=cn for Z.ai subscription', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'zai',
+          is_active: true,
+          auth_type: 'subscription',
+          region: 'cn',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'zai',
+        apiKey: 'zai-sub-key',
+        authType: 'subscription',
+        region: 'cn',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'zai',
+        'zai-sub-key',
+        'subscription',
+        'cn',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('cn');
+    });
+
+    it('should accept region=cn for dotted Z.ai subscription alias', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'z.ai',
+          is_active: true,
+          auth_type: 'subscription',
+          region: 'cn',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'z.ai',
+        apiKey: 'zai-sub-key',
+        authType: 'subscription',
+        region: 'cn',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'z.ai',
+        'zai-sub-key',
+        'subscription',
+        'cn',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('cn');
+    });
+
+    it('should reject invalid Z.ai subscription region', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'zai',
+          apiKey: 'zai-sub-key',
+          authType: 'subscription',
+          region: 'eu',
+        }),
+      ).rejects.toThrow('Z.ai subscription region must be one of: global, cn');
+    });
+
+    it('should accept a valid AWS Bedrock region for API-key auth', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'bedrock',
+          is_active: true,
+          auth_type: 'api_key',
+          region: 'eu-west-1',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'bedrock',
+        apiKey: 'bedrock-api-key-test',
+        authType: 'api_key',
+        region: 'eu-west-1',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'bedrock',
+        'bedrock-api-key-test',
+        'api_key',
+        'eu-west-1',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('eu-west-1');
+    });
+
+    it('should reject invalid AWS Bedrock regions', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'bedrock',
+          apiKey: 'bedrock-api-key-test',
+          authType: 'api_key',
+          region: 'global',
+        }),
+      ).rejects.toThrow('AWS Bedrock region must be a valid AWS region code');
+    });
+
+    it('should reject region when MiniMax is connected with api_key auth', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'minimax',
+          apiKey: 'sk-test',
+          authType: 'api_key',
+          region: 'cn',
+        }),
+      ).rejects.toThrow(
+        'region is only supported for Alibaba/Qwen providers, AWS Bedrock, MiniMax subscriptions, Xiaomi MiMo Token Plan, and Z.ai subscriptions',
+      );
     });
   });
 
@@ -352,9 +641,12 @@ describe('ProviderController', () => {
 
   describe('deactivateAllProviders', () => {
     it('should return ok after deactivating all', async () => {
-      const result = await controller.deactivateAllProviders(mockUser, mockAgentName);
+      const result = await controller.deactivateAllProviders(mockCtx, mockAgentName);
 
-      expect(mockProviderService.deactivateAllProviders).toHaveBeenCalledWith(TEST_AGENT_ID);
+      expect(mockProviderService.deactivateAllProviders).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+      );
       expect(result).toEqual({ ok: true });
     });
   });
@@ -366,14 +658,16 @@ describe('ProviderController', () => {
       mockProviderService.removeProvider.mockResolvedValue({ notifications: 3 });
 
       const result = await controller.removeProvider(
-        mockUser,
+        mockCtx,
         { agentName: 'test-agent', provider: 'openai' } as never,
         {} as never,
       );
 
       expect(mockProviderService.removeProvider).toHaveBeenCalledWith(
         TEST_AGENT_ID,
+        'tenant-1',
         'openai',
+        undefined,
         undefined,
       );
       expect(result).toEqual({ ok: true, notifications: 3 });
@@ -383,7 +677,7 @@ describe('ProviderController', () => {
       mockProviderService.removeProvider.mockResolvedValue({ notifications: 0 });
 
       const result = await controller.removeProvider(
-        mockUser,
+        mockCtx,
         { agentName: 'test-agent', provider: 'deepseek' } as never,
         {} as never,
       );
@@ -394,15 +688,17 @@ describe('ProviderController', () => {
       mockProviderService.removeProvider.mockResolvedValue({ notifications: [] });
 
       await controller.removeProvider(
-        mockUser,
+        mockCtx,
         { agentName: 'test-agent', provider: 'anthropic' } as never,
         { authType: 'subscription' } as never,
       );
 
       expect(mockProviderService.removeProvider).toHaveBeenCalledWith(
         TEST_AGENT_ID,
+        'tenant-1',
         'anthropic',
         'subscription',
+        undefined,
       );
     });
   });
@@ -413,10 +709,8 @@ describe('ProviderController', () => {
     it('should throw NotFoundException when tenant is not found', async () => {
       mockResolveAgent.resolve.mockRejectedValue(new NotFoundException('Tenant not found'));
 
-      await expect(controller.getStatus(mockUser, mockAgentName)).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('user-1', 'test-agent');
+      await expect(controller.getStatus(mockCtx, mockAgentName)).rejects.toThrow(NotFoundException);
+      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('tenant-1', 'test-agent');
     });
 
     it('should throw NotFoundException when agent is not found', async () => {
@@ -425,30 +719,55 @@ describe('ProviderController', () => {
       );
 
       await expect(
-        controller.getProviders(mockUser, { agentName: 'nonexistent' } as never),
+        controller.getProviders(mockCtx, { agentName: 'nonexistent' } as never),
       ).rejects.toThrow(NotFoundException);
-      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('user-1', 'nonexistent');
+      // getProviders passes { allowPlayground: true } so the Playground agent can be
+      // read; the NotFoundException originates from the service mock, not the
+      // is_playground check.
+      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('tenant-1', 'nonexistent', {
+        allowPlayground: true,
+      });
     });
 
     it('should resolve agent and pass its id to service methods', async () => {
-      mockResolveAgent.resolve.mockResolvedValue({ id: 'agent-xyz', name: 'my-agent' });
+      mockResolveAgent.resolve.mockResolvedValue({
+        id: 'agent-xyz',
+        name: 'my-agent',
+        tenant_id: TEST_TENANT_ID,
+      });
       mockProviderService.getProviders.mockResolvedValue([]);
 
-      await controller.getStatus(mockUser, { agentName: 'my-agent' } as never);
+      await controller.getStatus(mockCtx, { agentName: 'my-agent' } as never);
 
-      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('user-1', 'my-agent');
-      expect(mockProviderService.getProviders).toHaveBeenCalledWith('agent-xyz');
+      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('tenant-1', 'my-agent');
+      expect(mockProviderService.getProviders).toHaveBeenCalledWith('tenant-1');
     });
 
     it('should propagate NotFoundException through upsertProvider', async () => {
       mockResolveAgent.resolve.mockRejectedValue(new NotFoundException('Tenant not found'));
 
       await expect(
-        controller.upsertProvider(mockUser, mockAgentName, {
+        controller.upsertProvider(mockCtx, mockAgentName, {
           provider: 'openai',
           apiKey: 'sk-test',
         }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('upsertProvider passes { allowPlayground: true } so the Playground agent can connect providers', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: { id: 'p1', provider: 'openai', is_active: true },
+        isNew: false,
+      });
+
+      await controller.upsertProvider(mockCtx, { agentName: 'Playground' } as never, {
+        provider: 'openai',
+        apiKey: 'sk-test',
+      });
+
+      expect(mockResolveAgent.resolve).toHaveBeenCalledWith('tenant-1', 'Playground', {
+        allowPlayground: true,
+      });
     });
 
     it('should propagate NotFoundException through removeProvider', async () => {
@@ -458,11 +777,99 @@ describe('ProviderController', () => {
 
       await expect(
         controller.removeProvider(
-          mockUser,
+          mockCtx,
           { agentName: 'missing-agent', provider: 'openai' } as never,
           {} as never,
         ),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  /* ── multi-key endpoints ── */
+
+  describe('renameProviderKey', () => {
+    it('forwards label rename to service and returns mapped row', async () => {
+      mockProviderService.renameKey.mockResolvedValue({
+        id: 'p1',
+        provider: 'openai',
+        auth_type: 'api_key',
+        label: 'Work',
+        priority: 1,
+      });
+
+      const result = await controller.renameProviderKey(
+        mockCtx,
+        { agentName: 'test-agent', provider: 'openai', label: 'Personal' } as never,
+        { newLabel: 'Work' } as never,
+      );
+
+      expect(mockProviderService.renameKey).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'openai',
+        'api_key',
+        'Personal',
+        'Work',
+      );
+      expect(result).toEqual({
+        id: 'p1',
+        provider: 'openai',
+        auth_type: 'api_key',
+        label: 'Work',
+        priority: 1,
+      });
+    });
+
+    it('honors explicit authType in body', async () => {
+      mockProviderService.renameKey.mockResolvedValue({
+        id: 'p1',
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        label: 'Renamed',
+        priority: 0,
+      });
+
+      await controller.renameProviderKey(
+        mockCtx,
+        { agentName: 'test-agent', provider: 'anthropic', label: 'Default' } as never,
+        { newLabel: 'Renamed', authType: 'subscription' } as never,
+      );
+
+      expect(mockProviderService.renameKey).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'anthropic',
+        'subscription',
+        'Default',
+        'Renamed',
+      );
+    });
+  });
+
+  describe('reorderProviderKeys', () => {
+    it('passes ordered labels to service and returns rows sorted by priority', async () => {
+      mockProviderService.reorderKeys.mockResolvedValue([
+        { id: 'p1', label: 'Personal', priority: 1 },
+        { id: 'p2', label: 'Work', priority: 0 },
+      ]);
+
+      const result = await controller.reorderProviderKeys(
+        mockCtx,
+        { agentName: 'test-agent', provider: 'openai' } as never,
+        { labels: ['Work', 'Personal'] } as never,
+      );
+
+      expect(mockProviderService.reorderKeys).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'openai',
+        'api_key',
+        ['Work', 'Personal'],
+      );
+      expect(result).toEqual([
+        { id: 'p2', label: 'Work', priority: 0 },
+        { id: 'p1', label: 'Personal', priority: 1 },
+      ]);
     });
   });
 });

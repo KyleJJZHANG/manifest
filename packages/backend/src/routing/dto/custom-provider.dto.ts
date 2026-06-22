@@ -11,9 +11,16 @@ import {
   ArrayMinSize,
   ArrayMaxSize,
   IsUrl,
+  IsIn,
   Min,
+  IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+
+export const CUSTOM_PROVIDER_API_KINDS = ['openai', 'anthropic'] as const;
+export type CustomProviderApiKindDto = (typeof CUSTOM_PROVIDER_API_KINDS)[number];
+export const CUSTOM_PROVIDER_MODEL_LIMIT = 500;
+
 export class CustomProviderModelDto {
   @IsString()
   @IsNotEmpty()
@@ -37,6 +44,10 @@ export class CustomProviderModelDto {
   @Min(1)
   @Type(() => Number)
   context_window?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  price_estimated?: boolean;
 }
 
 export class CreateCustomProviderDto {
@@ -44,8 +55,8 @@ export class CreateCustomProviderDto {
   @IsNotEmpty()
   @MinLength(1)
   @MaxLength(50)
-  @Matches(/^[a-zA-Z0-9 _-]+$/, {
-    message: 'Name can only contain letters, numbers, spaces, hyphens, and underscores',
+  @Matches(/^[a-zA-Z0-9 ._-]+$/, {
+    message: 'Name can only contain letters, numbers, spaces, dots, hyphens, and underscores',
   })
   name!: string;
 
@@ -55,12 +66,16 @@ export class CreateCustomProviderDto {
   base_url!: string;
 
   @IsOptional()
+  @IsIn(CUSTOM_PROVIDER_API_KINDS, { message: 'api_kind must be "openai" or "anthropic"' })
+  api_kind?: CustomProviderApiKindDto;
+
+  @IsOptional()
   @IsString()
   apiKey?: string;
 
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(50)
+  @ArrayMaxSize(CUSTOM_PROVIDER_MODEL_LIMIT)
   @ValidateNested({ each: true })
   @Type(() => CustomProviderModelDto)
   models!: CustomProviderModelDto[];
@@ -74,6 +89,15 @@ export class ProbeCustomProviderDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(50)
+  provider_name?: string;
+
+  @IsOptional()
+  @IsIn(CUSTOM_PROVIDER_API_KINDS, { message: 'api_kind must be "openai" or "anthropic"' })
+  api_kind?: CustomProviderApiKindDto;
+
+  @IsOptional()
+  @IsString()
   apiKey?: string;
 }
 
@@ -83,8 +107,8 @@ export class UpdateCustomProviderDto {
   @IsNotEmpty()
   @MinLength(1)
   @MaxLength(50)
-  @Matches(/^[a-zA-Z0-9 _-]+$/, {
-    message: 'Name can only contain letters, numbers, spaces, hyphens, and underscores',
+  @Matches(/^[a-zA-Z0-9 ._-]+$/, {
+    message: 'Name can only contain letters, numbers, spaces, dots, hyphens, and underscores',
   })
   name?: string;
 
@@ -95,13 +119,17 @@ export class UpdateCustomProviderDto {
   base_url?: string;
 
   @IsOptional()
+  @IsIn(CUSTOM_PROVIDER_API_KINDS, { message: 'api_kind must be "openai" or "anthropic"' })
+  api_kind?: CustomProviderApiKindDto;
+
+  @IsOptional()
   @IsString()
   apiKey?: string;
 
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(50)
+  @ArrayMaxSize(CUSTOM_PROVIDER_MODEL_LIMIT)
   @ValidateNested({ each: true })
   @Type(() => CustomProviderModelDto)
   models?: CustomProviderModelDto[];

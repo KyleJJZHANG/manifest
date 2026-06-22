@@ -1,10 +1,23 @@
 import { toast } from '../toast-store.js';
+import { cachedFetch, isCacheable, invalidateAll } from './cache.js';
 
 export const BASE_URL = '/api/v1';
+
+/** Options for {@link fetchJson}. */
+export interface FetchJsonOptions {
+  /**
+   * Per-call opt-out of the SWR cache. Defaults to `true` (cache on) for any
+   * cacheable GET. Pass `false` to force a live network read — e.g. for a
+   * surface that must never serve a stale payload but isn't on the global
+   * deny-list. Deny-listed URLs are never cached regardless of this flag.
+   */
+  cache?: boolean;
+}
 
 export async function fetchJson<T>(
   path: string,
   params?: Record<string, string | undefined>,
+  options?: FetchJsonOptions,
 ): Promise<T> {
   const url = new URL(`${BASE_URL}${path}`, window.location.origin);
   if (params) {
@@ -12,14 +25,38 @@ export async function fetchJson<T>(
       if (value) url.searchParams.set(key, value);
     }
   }
+  const key = url.toString();
 
-  const res = await fetch(url.toString(), { credentials: 'include', cache: 'no-store' });
+  // Default-on SWR caching for GETs, unless the caller opted out or the URL is on
+  // the always-fresh deny-list (sessions, key reveal/rotate, SSE, health).
+  const useCache = options?.cache !== false && isCacheable(key);
+  if (useCache) {
+    return cachedFetch<T>(key, () => doFetchJson<T>(key));
+  }
+  return doFetchJson<T>(key);
+}
+
+/** Performs the raw GET + error handling. Kept separate so the cache wraps only the network. */
+async function doFetchJson<T>(url: string): Promise<T> {
+  // 'default' lets the browser revalidate via ETag / Cache-Control. Backend
+  // analytics endpoints set short max-age=10 which keeps stale UI bounded;
+  // SSE-driven refetches still bypass cache because they pass a unique signal.
+  const res = await fetch(url, { credentials: 'include', cache: 'default' });
   if (res.status === 401) {
-    // Session expired or user logged out — silently redirect to login
-    if (window.location.pathname !== '/login') {
-      window.location.href = '/login';
+    // Only redirect to /login when the 401 looks like a real session
+    // expiry. Per-endpoint 401s (e.g. an endpoint that requires a
+    // user-scoped credential when called with a shared API key) shouldn't
+    // log the user out.
+    const body = await res.text().catch(() => '');
+    const looksLikeSessionExpiry =
+      !body || /session|cookie|unauthenticated|not authenticated/i.test(body);
+    if (looksLikeSessionExpiry) {
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+      throw new Error('Session expired');
     }
-    throw new Error('Session expired');
+    throw new Error(body || 'Unauthorized');
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -46,6 +83,12 @@ export async function fetchMutate<T = void>(path: string, options: RequestInit):
     toast.error(message);
     throw new Error(message);
   }
+  // A mutation (POST/PUT/PATCH/DELETE) can change data behind any number of GET
+  // keys (e.g. renaming an agent touches the agent list, every per-agent view,
+  // and the message log). The blast radius isn't statically knowable from the
+  // path alone, so drop the whole GET cache — the next navigation refetches
+  // fresh. Mutations are rare relative to reads, so this is cheap and correct.
+  invalidateAll();
   const text = await res.text();
   if (!text) return undefined as T;
   return JSON.parse(text) as T;

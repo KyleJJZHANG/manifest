@@ -4,20 +4,17 @@ import RoutingTabs from '../../src/components/RoutingTabs';
 
 function renderTabs(
   overrides: Partial<{
-    complexityEnabled: boolean;
     specificityEnabled: boolean;
     customEnabled: boolean;
   }> = {},
 ) {
   return render(() => (
     <RoutingTabs
-      complexityEnabled={() => overrides.complexityEnabled ?? false}
       specificityEnabled={() => overrides.specificityEnabled ?? false}
       customEnabled={() => overrides.customEnabled ?? false}
     >
       {{
         default: <div data-testid="default-content">Default content</div>,
-        complexity: <div data-testid="complexity-content">Complexity content</div>,
         specificity: <div data-testid="specificity-content">Specificity content</div>,
         custom: <div data-testid="custom-content">Custom content</div>,
       }}
@@ -26,10 +23,9 @@ function renderTabs(
 }
 
 describe('RoutingTabs', () => {
-  it('renders all four tab labels', () => {
+  it('renders all three tab labels', () => {
     renderTabs();
     expect(screen.getByRole('tab', { name: /Default/ })).toBeDefined();
-    expect(screen.getByRole('tab', { name: /Complexity/ })).toBeDefined();
     expect(screen.getByRole('tab', { name: /Task-specific/ })).toBeDefined();
     expect(screen.getByRole('tab', { name: /Custom/ })).toBeDefined();
   });
@@ -42,16 +38,8 @@ describe('RoutingTabs', () => {
   it('shows default content by default', () => {
     renderTabs();
     expect(screen.getByTestId('default-content')).toBeDefined();
-    expect(screen.queryByTestId('complexity-content')).toBeNull();
     expect(screen.queryByTestId('specificity-content')).toBeNull();
     expect(screen.queryByTestId('custom-content')).toBeNull();
-  });
-
-  it('switches to complexity tab on click', () => {
-    renderTabs();
-    fireEvent.click(screen.getByRole('tab', { name: /Complexity/ }));
-    expect(screen.queryByTestId('default-content')).toBeNull();
-    expect(screen.getByTestId('complexity-content')).toBeDefined();
   });
 
   it('switches to specificity tab on click', () => {
@@ -73,16 +61,16 @@ describe('RoutingTabs', () => {
     const defaultTab = screen.getByRole('tab', { name: /Default/ });
     expect(defaultTab.getAttribute('aria-selected')).toBe('true');
 
-    const complexityTab = screen.getByRole('tab', { name: /Complexity/ });
-    expect(complexityTab.getAttribute('aria-selected')).toBe('false');
+    const specificityTab = screen.getByRole('tab', { name: /Task-specific/ });
+    expect(specificityTab.getAttribute('aria-selected')).toBe('false');
   });
 
   it('updates aria-selected on tab switch', () => {
     renderTabs();
-    fireEvent.click(screen.getByRole('tab', { name: /Complexity/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Task-specific/ }));
 
     expect(screen.getByRole('tab', { name: /Default/ }).getAttribute('aria-selected')).toBe('false');
-    expect(screen.getByRole('tab', { name: /Complexity/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: /Task-specific/ }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('renders tabpanel with correct role', () => {
@@ -91,25 +79,23 @@ describe('RoutingTabs', () => {
   });
 
   it('shows green dot for enabled layers and gray for disabled', () => {
-    const { container } = renderTabs({ complexityEnabled: true, specificityEnabled: false, customEnabled: true });
+    const { container } = renderTabs({ specificityEnabled: false, customEnabled: true });
     const dots = container.querySelectorAll('.routing-tabs__dot');
-    // Default (always on), complexity (on), specificity (off), custom (on)
+    // Default (always on), specificity (off), custom (on)
     expect(dots[0].classList.contains('routing-tabs__dot--on')).toBe(true);
-    expect(dots[1].classList.contains('routing-tabs__dot--on')).toBe(true);
-    expect(dots[2].classList.contains('routing-tabs__dot--off')).toBe(true);
-    expect(dots[3].classList.contains('routing-tabs__dot--on')).toBe(true);
+    expect(dots[1].classList.contains('routing-tabs__dot--off')).toBe(true);
+    expect(dots[2].classList.contains('routing-tabs__dot--on')).toBe(true);
   });
 
-  it('Default tab always has a green dot', () => {
+  it('Default tab always has a green dot; specificity and custom are off by default', () => {
     const { container } = renderTabs();
     const dots = container.querySelectorAll('.routing-tabs__dot');
-    expect(dots.length).toBe(4);
+    expect(dots.length).toBe(3);
     // Default dot is always on
     expect(dots[0].classList.contains('routing-tabs__dot--on')).toBe(true);
-    // Others are off
+    // Specificity and Custom are off by default
     expect(dots[1].classList.contains('routing-tabs__dot--off')).toBe(true);
     expect(dots[2].classList.contains('routing-tabs__dot--off')).toBe(true);
-    expect(dots[3].classList.contains('routing-tabs__dot--off')).toBe(true);
   });
 
   it('applies active class to selected tab', () => {
@@ -121,36 +107,34 @@ describe('RoutingTabs', () => {
 
   /* ---- Pipeline help modal ---- */
 
-  it('shows help button when pipelineHelp returns content', () => {
+  it('accepts pipelineHelp prop without rendering help button or modal', () => {
     render(() => (
       <RoutingTabs
-        complexityEnabled={() => true}
         specificityEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => <div data-testid="help-content">Help text</div>}
       >
         {{
           default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
           specificity: <div>Specificity</div>,
           custom: <div>Custom</div>,
         }}
       </RoutingTabs>
     ));
-    expect(screen.getByLabelText('How routing works')).toBeDefined();
+    // Help button and modal are now managed by the parent (Routing.tsx)
+    expect(screen.queryByLabelText('How routing works')).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('does not show help button when pipelineHelp returns null', () => {
     render(() => (
       <RoutingTabs
-        complexityEnabled={() => false}
         specificityEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => null}
       >
         {{
           default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
           specificity: <div>Specificity</div>,
           custom: <div>Custom</div>,
         }}
@@ -159,117 +143,72 @@ describe('RoutingTabs', () => {
     expect(screen.queryByLabelText('How routing works')).toBeNull();
   });
 
-  it('opens help modal on button click and shows content', async () => {
+  it('renders headerRight slot when provided', () => {
     render(() => (
       <RoutingTabs
-        complexityEnabled={() => true}
         specificityEnabled={() => false}
         customEnabled={() => false}
-        pipelineHelp={() => <div data-testid="help-content">Pipeline info</div>}
+        headerRight={<div data-testid="header-right-content">Right content</div>}
       >
         {{
           default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
           specificity: <div>Specificity</div>,
           custom: <div>Custom</div>,
         }}
       </RoutingTabs>
     ));
-    fireEvent.click(screen.getByLabelText('How routing works'));
-    await waitFor(() => {
-      expect(screen.getByRole('dialog')).toBeDefined();
-      expect(screen.getByText('How routing works', { selector: 'h2' })).toBeDefined();
-      expect(screen.getByTestId('help-content')).toBeDefined();
-    });
+    expect(screen.getByTestId('header-right-content')).toBeDefined();
   });
 
-  it('closes help modal on "Got it" click', async () => {
+  it('does not render headerRight wrapper when no slot is provided', () => {
+    const { container } = render(() => (
+      <RoutingTabs
+        specificityEnabled={() => false}
+        customEnabled={() => false}
+      >
+        {{
+          default: <div>Default</div>,
+          specificity: <div>Specificity</div>,
+          custom: <div>Custom</div>,
+        }}
+      </RoutingTabs>
+    ));
+    expect(container.querySelector('.routing-tabs__header-right')).toBeNull();
+  });
+
+  it('accepts onShowHelp prop for parent-managed help modal', () => {
+    const onShowHelp = vi.fn();
     render(() => (
       <RoutingTabs
-        complexityEnabled={() => true}
+        specificityEnabled={() => false}
+        customEnabled={() => false}
+        onShowHelp={onShowHelp}
+      >
+        {{
+          default: <div>Default</div>,
+          specificity: <div>Specificity</div>,
+          custom: <div>Custom</div>,
+        }}
+      </RoutingTabs>
+    ));
+    // The component accepts the prop but does not render a help button itself
+    expect(screen.queryByLabelText('How routing works')).toBeNull();
+  });
+
+  it('does not render a help modal internally even with pipelineHelp', () => {
+    render(() => (
+      <RoutingTabs
         specificityEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => <div>Help</div>}
       >
         {{
           default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
           specificity: <div>Specificity</div>,
           custom: <div>Custom</div>,
         }}
       </RoutingTabs>
     ));
-    fireEvent.click(screen.getByLabelText('How routing works'));
-    await waitFor(() => expect(screen.getByRole('dialog')).toBeDefined());
-    fireEvent.click(screen.getByText('Got it'));
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  });
-
-  it('closes help modal on overlay click', async () => {
-    render(() => (
-      <RoutingTabs
-        complexityEnabled={() => true}
-        specificityEnabled={() => false}
-        customEnabled={() => false}
-        pipelineHelp={() => <div>Help</div>}
-      >
-        {{
-          default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
-      </RoutingTabs>
-    ));
-    fireEvent.click(screen.getByLabelText('How routing works'));
-    await waitFor(() => expect(screen.getByRole('dialog')).toBeDefined());
-    const overlay = screen.getByRole('dialog').parentElement!;
-    fireEvent.click(overlay);
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  });
-
-  it('closes help modal on Escape key', async () => {
-    render(() => (
-      <RoutingTabs
-        complexityEnabled={() => true}
-        specificityEnabled={() => false}
-        customEnabled={() => false}
-        pipelineHelp={() => <div>Help</div>}
-      >
-        {{
-          default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
-      </RoutingTabs>
-    ));
-    fireEvent.click(screen.getByLabelText('How routing works'));
-    await waitFor(() => expect(screen.getByRole('dialog')).toBeDefined());
-    const overlay = screen.getByRole('dialog').parentElement!;
-    fireEvent.keyDown(overlay, { key: 'Escape' });
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  });
-
-  it('does not close help modal when clicking inside the dialog card', async () => {
-    render(() => (
-      <RoutingTabs
-        complexityEnabled={() => true}
-        specificityEnabled={() => false}
-        customEnabled={() => false}
-        pipelineHelp={() => <div>Help</div>}
-      >
-        {{
-          default: <div>Default</div>,
-          complexity: <div>Complexity</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
-      </RoutingTabs>
-    ));
-    fireEvent.click(screen.getByLabelText('How routing works'));
-    await waitFor(() => expect(screen.getByRole('dialog')).toBeDefined());
-    fireEvent.click(screen.getByRole('dialog'));
-    expect(screen.getByRole('dialog')).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

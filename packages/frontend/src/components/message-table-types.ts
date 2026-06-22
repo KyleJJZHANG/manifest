@@ -4,6 +4,7 @@ export interface MessageRow {
   agent_name: string | null;
   model: string | null;
   provider?: string | null;
+  custom_provider_name?: string | null;
   display_name?: string | null;
   routing_tier?: string;
   routing_reason?: string;
@@ -24,6 +25,7 @@ export interface MessageRow {
   cache_creation_tokens?: number | null;
   duration_ms?: number | null;
   feedback_rating?: string | null;
+  recorded?: boolean | null;
 }
 
 export type MessageColumnKey =
@@ -37,21 +39,23 @@ export type MessageColumnKey =
   | 'cache'
   | 'duration'
   | 'status'
-  | 'feedback';
+  | 'feedback'
+  | 'agent';
 
 export const COMPACT_COLUMNS: MessageColumnKey[] = [
   'feedback',
   'date',
+  'status',
   'model',
   'message',
   'cost',
   'totalTokens',
-  'status',
 ];
 
 export const DETAILED_COLUMNS: MessageColumnKey[] = [
   'feedback',
   'date',
+  'status',
   'model',
   'message',
   'cost',
@@ -60,5 +64,4 @@ export const DETAILED_COLUMNS: MessageColumnKey[] = [
   'output',
   'cache',
   'duration',
-  'status',
 ];

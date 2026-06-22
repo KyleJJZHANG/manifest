@@ -33,7 +33,7 @@
     "packages/manifest"
   ],
   "scripts": {
-    "dev": "turbo dev",
+    "dev": "turbo dev --filter=manifest-frontend",
     "build": "turbo build",
     "test": "turbo test",
     "start": "node -r dotenv/config packages/backend/dist/main.js dotenv_config_path=packages/backend/.env",

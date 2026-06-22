@@ -36,141 +36,24 @@
   animation: fadeInUp 300ms ease-out both;
 }
 
-/* ── Agent Card Menu (kebab) ───────────────────────── */
-.agent-card__menu {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 2;
-}
-
-.agent-card__menu-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: calc(var(--radius) - 2px);
-  background: transparent;
-  color: hsl(var(--muted-foreground));
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity var(--transition-fast),
-    background-color var(--transition-fast),
-    color var(--transition-fast);
-}
-
-.agent-card-wrap:hover .agent-card__menu-trigger,
-.agent-card-wrap:focus-within .agent-card__menu-trigger,
-.agent-card__menu--open .agent-card__menu-trigger {
-  opacity: 1;
-}
-
-.agent-card__menu-trigger:hover,
-.agent-card__menu--open .agent-card__menu-trigger {
-  background: hsl(var(--accent));
-  color: hsl(var(--foreground));
-}
-
-.agent-card__menu-trigger:focus-visible {
-  outline: 2px solid hsl(var(--ring));
-  outline-offset: 2px;
-  opacity: 1;
-}
-
-.agent-card__menu-popover {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  min-width: 160px;
-  padding: 4px;
-  background: hsl(var(--card));
-  border: 1px solid hsl(var(--border));
-  border-radius: var(--radius);
-  box-shadow: var(--card-shadow-hover);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  animation: fadeInUp 120ms ease-out both;
-}
-
-.agent-card__menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: none;
-  border-radius: calc(var(--radius) - 2px);
-  background: transparent;
-  color: hsl(var(--foreground));
-  font-size: var(--font-size-sm);
-  font-family: var(--font-family);
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--transition-fast);
-}
-
-.agent-card__menu-item:hover,
-.agent-card__menu-item:focus-visible {
-  background: hsl(var(--accent));
-  outline: none;
-}
-
-.agent-card__menu-item--danger {
-  color: hsl(var(--destructive, 0 72% 51%));
-}
-
-.agent-card__menu-item--danger:hover,
-.agent-card__menu-item--danger:focus-visible {
-  background: hsl(var(--destructive, 0 72% 51%) / 0.08);
-}
+/* Agent card kebab menu styling lives in action-menu.css (.agent-card__menu
+   variant of the shared ActionMenu). */
 
 /* ── Duplicate Agent Modal ─────────────────────────── */
-.duplicate-agent__details {
+.duplicate-agent__section {
   margin-top: var(--gap-md);
-  padding: 10px 12px;
-  background: hsl(var(--muted) / 0.4);
-  border: 1px solid hsl(var(--border));
-  border-radius: var(--radius);
   font-size: var(--font-size-sm);
 }
 
-.duplicate-agent__details > summary {
-  cursor: pointer;
+.duplicate-agent__section-header {
   font-weight: 500;
   color: hsl(var(--foreground));
-  list-style: none;
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.duplicate-agent__details > summary::-webkit-details-marker {
-  display: none;
-}
-
-.duplicate-agent__details > summary::before {
-  content: '';
-  display: inline-block;
-  width: 0;
-  height: 0;
-  margin-right: 4px;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid hsl(var(--muted-foreground));
-  transition: transform var(--transition-fast);
-}
-
-.duplicate-agent__details[open] > summary::before {
-  transform: rotate(90deg);
-}
-
 .duplicate-agent__badge {
-  margin-left: auto;
   padding: 1px 8px;
   background: hsl(var(--accent));
   color: hsl(var(--foreground));
@@ -195,14 +78,8 @@
   font-weight: 500;
 }
 
-.duplicate-agent__skipped {
-  list-style: none;
-  margin-left: -18px;
-  padding-top: 6px;
-  margin-top: 4px;
-  border-top: 1px dashed hsl(var(--border));
-  font-size: var(--font-size-xs);
-  color: hsl(var(--muted-foreground));
+.duplicate-agent__section + .duplicate-agent__section {
+  margin-top: var(--gap-sm);
 }
 
 .agent-card__top {
@@ -219,7 +96,9 @@
 }
 
 .dark .agent-card__platform-icon[src*='openai'],
+.dark .agent-card__platform-icon[src*='anthropic'],
 .dark .agent-card__platform-icon[src*='vercel'],
+.dark .agent-card__platform-icon[src*='opencode'],
 .dark .agent-card__platform-icon[src*='other'] {
   filter: invert(1);
 }
@@ -345,9 +224,19 @@
   margin-top: 2px;
 }
 
+.settings-card__label-desc--meta {
+  color: hsl(var(--muted-foreground));
+  margin-top: 4px;
+}
+
 .settings-card__control {
   flex-shrink: 0;
   width: 260px;
+}
+
+.settings-card__control--end {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .settings-card__input {
@@ -497,14 +386,18 @@
 
 /* Dark-mode icon inversion for Settings agent type display */
 .dark .settings-type__icon[src*='openai'],
+.dark .settings-type__icon[src*='anthropic'],
 .dark .settings-type__icon[src*='vercel'],
+.dark .settings-type__icon[src*='opencode'],
 .dark .settings-type__icon[src*='other'] {
   filter: invert(1);
 }
 
 /* Dark-mode icon inversion for Overview heading */
 .dark .overview__platform-icon[src*='openai'],
+.dark .overview__platform-icon[src*='anthropic'],
 .dark .overview__platform-icon[src*='vercel'],
+.dark .overview__platform-icon[src*='opencode'],
 .dark .overview__platform-icon[src*='other'] {
   filter: invert(1);
 }

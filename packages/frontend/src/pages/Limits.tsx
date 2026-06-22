@@ -122,21 +122,17 @@ const Limits: Component = () => {
   };
 
   return (
-    <div class="container--sm">
+    <div class="container--lg">
       <Title>{agentDisplayName() ?? agentName()} Limits - Manifest</Title>
       <Meta
         name="description"
         content={`Configure limits and alerts for ${agentDisplayName() ?? agentName()}.`}
       />
 
-      <div class="page-header">
-        <div>
-          <h1>Limits</h1>
-          <span class="breadcrumb">
-            {agentDisplayName() ?? agentName()} &rsaquo; Get notified or block requests when token
-            or cost thresholds are exceeded
-          </span>
-        </div>
+      <div class="page-header" style="border-bottom: none; padding-bottom: 0;">
+        <span class="breadcrumb">
+          Get notified or block requests when token or cost thresholds are exceeded
+        </span>
         <button
           class="btn btn--primary btn--sm"
           onClick={() => {
@@ -144,7 +140,21 @@ const Limits: Component = () => {
             setShowModal(true);
           }}
         >
-          + Create rule
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Create rule
         </button>
       </div>
 
@@ -166,7 +176,7 @@ const Limits: Component = () => {
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
           <span>
-            One or more hard limits triggered. New proxy requests for this agent will be blocked
+            One or more hard limits triggered. New proxy requests for this harness will be blocked
             until the usage resets in the next period.
           </span>
         </div>
@@ -190,10 +200,10 @@ const Limits: Component = () => {
             <line x1="12" y1="8" x2="12.01" y2="8" />
           </svg>
           <div>
-            <strong>Enable routing to set hard limits</strong>
+            <strong>Connect a provider to set hard limits</strong>
             <p>
               Hard limits automatically block proxy requests when usage exceeds a threshold. Email
-              alerts work without routing &mdash; only hard limits require it.
+              alerts work without a connected provider &mdash; only hard limits require one.
             </p>
           </div>
         </div>

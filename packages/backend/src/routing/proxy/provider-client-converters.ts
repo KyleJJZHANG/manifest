@@ -5,6 +5,8 @@ import {
   type GoogleStreamChunkResult,
 } from './google-adapter';
 import {
+  applyAnthropicMessagesMutations,
+  extractThinkingBlocksFromMessagesResponse,
   toAnthropicRequest,
   fromAnthropicResponse,
   transformAnthropicStreamChunk,
@@ -17,6 +19,11 @@ import {
   transformResponsesStreamChunk,
   collectChatGptSseResponse,
 } from './chatgpt-adapter';
+import {
+  normalizeOpenAiReasoningDelta,
+  type OpenAiReasoningStreamFormat,
+  supportsReasoningContent,
+} from './reasoning-format';
 
 /** Convert a ChatGPT Responses API response to OpenAI format. */
 export function convertChatGptResponse(
@@ -66,10 +73,17 @@ export function createAnthropicTransformer(
 }
 
 // Re-export adapter functions used by ProviderClient.forward()
-export { toGoogleRequest, toAnthropicRequest, toResponsesRequest, collectChatGptSseResponse };
+export {
+  applyAnthropicMessagesMutations,
+  extractThinkingBlocksFromMessagesResponse,
+  toGoogleRequest,
+  toAnthropicRequest,
+  toResponsesRequest,
+  collectChatGptSseResponse,
+};
 export type { GoogleStreamChunkResult } from './google-adapter';
 export type { ThinkingBlocksCallback } from './anthropic-adapter';
-export type { SignatureLookup, ThinkingBlockLookup } from './proxy-types';
+export type { SignatureLookup, ThinkingBlockLookup, ReasoningContentLookup } from './proxy-types';
 
 // ─── OpenAI body sanitization (used by ProviderClient.forward) ───────────────
 
@@ -102,16 +116,107 @@ const DEEPSEEK_MAX_TOKENS_LIMIT = 8192;
  */
 const OPENAI_MAX_COMPLETION_TOKENS_RE = /^(o\d|gpt-5)/i;
 
-function supportsReasoningContent(endpointKey: string, model: string): boolean {
-  if (endpointKey === 'deepseek') return true;
-  if (endpointKey === 'openrouter') return model.toLowerCase().startsWith('deepseek/');
-  return false;
+/**
+ * Endpoints that ultimately hit OpenAI infrastructure and therefore need
+ * `max_tokens` rewritten to `max_completion_tokens` for o-series / GPT-5+.
+ * Copilot belongs here because GitHub Copilot proxies these models to OpenAI
+ * (issue mnfst/manifest#1849).
+ */
+const OPENAI_MAX_COMPLETION_TOKENS_ENDPOINTS = new Set(['openai', 'copilot']);
+
+function usesOpenAiMaxCompletionTokens(endpointKey: string, bareModel: string): boolean {
+  return (
+    OPENAI_MAX_COMPLETION_TOKENS_ENDPOINTS.has(endpointKey) &&
+    OPENAI_MAX_COMPLETION_TOKENS_RE.test(bareModel)
+  );
 }
 
-function sanitizeOpenAiMessages(messages: unknown, endpointKey: string, model: string): unknown {
+export type ReasoningContentCallback = (firstToolCallId: string, content: string) => void;
+
+/**
+ * Creates a stateful OpenAI-compatible stream transformer that passes chunks
+ * through unchanged while accumulating reasoning_content for tool-call turns.
+ */
+export function createReasoningContentStreamTransformer(
+  onReasoningContent?: ReasoningContentCallback,
+  format: OpenAiReasoningStreamFormat = {
+    outputStreamDeltaPaths: ['reasoning_content'],
+    clientStreamDeltaPath: 'reasoning_content',
+  },
+): (chunk: string) => string | null {
+  let accumulatedReasoning = '';
+  let firstToolCallId: string | null = null;
+  let storedReasoning = '';
+
+  const storeIfReady = (): void => {
+    if (
+      onReasoningContent &&
+      accumulatedReasoning &&
+      firstToolCallId &&
+      accumulatedReasoning !== storedReasoning
+    ) {
+      onReasoningContent(firstToolCallId, accumulatedReasoning);
+      storedReasoning = accumulatedReasoning;
+    }
+  };
+
+  return (chunk: string): string | null => {
+    let outChunk = chunk;
+    try {
+      const parsed = JSON.parse(chunk) as Record<string, unknown>;
+      const choice = (parsed.choices as Array<Record<string, unknown>> | undefined)?.[0];
+      const delta = choice?.delta as Record<string, unknown> | undefined;
+
+      if (delta) {
+        const reasoning = normalizeOpenAiReasoningDelta(delta, format);
+        if (reasoning) {
+          accumulatedReasoning += reasoning.text;
+          if (reasoning.normalized) outChunk = JSON.stringify(parsed);
+          storeIfReady();
+        }
+        const toolCalls = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+        if (Array.isArray(toolCalls)) {
+          for (const toolCall of toolCalls) {
+            if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) continue;
+            if (firstToolCallId === null && typeof toolCall.id === 'string' && toolCall.id) {
+              firstToolCallId = toolCall.id;
+            }
+          }
+          storeIfReady();
+        }
+      }
+
+      if (choice?.finish_reason === 'tool_calls') storeIfReady();
+    } catch {
+      // Pass malformed/non-JSON chunks through unchanged.
+    }
+
+    return `data: ${outChunk}\n\n`;
+  };
+}
+
+/**
+ * `reasoning_details` is OpenRouter's structured echo of extended-thinking
+ * blocks in assistant messages (array of `{type, thinking, signature}`).
+ * Only OpenRouter accepts it as an input field — every other OpenAI-compatible
+ * provider (Mistral, native OpenAI, Groq, etc.) rejects unknown message fields
+ * with `extra_forbidden` / 422. Strip it before forwarding to those targets so
+ * that turn N+1 doesn't fail when routing flips off a reasoning model.
+ */
+function supportsReasoningDetails(endpointKey: string): boolean {
+  return endpointKey === 'openrouter';
+}
+
+function sanitizeOpenAiMessages(
+  messages: unknown,
+  endpointKey: string,
+  model: string,
+  reasoningContentLookup?: (firstToolCallId: string) => string | null,
+): unknown {
   if (!Array.isArray(messages)) return messages;
 
   const preserveReasoningContent = supportsReasoningContent(endpointKey, model);
+  const preserveReasoningDetails = supportsReasoningDetails(endpointKey);
   const isMistral = endpointKey === 'mistral';
   const mistralIdMap = new Map<string, string>();
   const reservedMistralIds = new Set<string>();
@@ -178,6 +283,27 @@ function sanitizeOpenAiMessages(messages: unknown, endpointKey: string, model: s
     if (!preserveReasoningContent) {
       delete cleaned.reasoning_content;
     }
+    if (!preserveReasoningDetails) {
+      delete cleaned.reasoning_details;
+    }
+
+    if (
+      preserveReasoningContent &&
+      !cleaned.reasoning_content &&
+      Array.isArray(cleaned.tool_calls) &&
+      cleaned.tool_calls.length > 0 &&
+      reasoningContentLookup
+    ) {
+      const firstToolCall = cleaned.tool_calls[0];
+      const firstToolCallId =
+        firstToolCall && typeof firstToolCall === 'object' && !Array.isArray(firstToolCall)
+          ? (firstToolCall as Record<string, unknown>).id
+          : undefined;
+      if (typeof firstToolCallId === 'string') {
+        const cached = reasoningContentLookup(firstToolCallId);
+        if (cached) cleaned.reasoning_content = cached;
+      }
+    }
 
     if (isMistral && Array.isArray(cleaned.tool_calls)) {
       cleaned.tool_calls = cleaned.tool_calls.map((toolCall) => {
@@ -221,37 +347,43 @@ export function sanitizeOpenAiBody(
   body: Record<string, unknown>,
   endpointKey: string,
   model: string,
+  reasoningContentLookup?: (firstToolCallId: string) => string | null,
 ): Record<string, unknown> {
   const passthroughTopLevel = PASSTHROUGH_PROVIDERS.has(endpointKey);
 
-  // For OpenAI models that require max_completion_tokens, convert before passthrough.
   // Strip vendor prefix (e.g., "openai/gpt-5" → "gpt-5") before matching.
   const bareForRegex = model.includes('/') ? model.substring(model.indexOf('/') + 1) : model;
+  const needsMaxCompletionTokens = usesOpenAiMaxCompletionTokens(endpointKey, bareForRegex);
   const convertMaxTokens =
-    endpointKey === 'openai' &&
-    OPENAI_MAX_COMPLETION_TOKENS_RE.test(bareForRegex) &&
-    'max_tokens' in body &&
-    !('max_completion_tokens' in body);
+    needsMaxCompletionTokens && 'max_tokens' in body && !('max_completion_tokens' in body);
 
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     if (key === 'messages') {
-      cleaned[key] = sanitizeOpenAiMessages(value, endpointKey, model);
+      cleaned[key] = sanitizeOpenAiMessages(value, endpointKey, model, reasoningContentLookup);
+      continue;
+    }
+    // Rewrite max_tokens → max_completion_tokens for OpenAI-backed endpoints that
+    // require it (native OpenAI + Copilot for o-series / GPT-5+). Applies in both
+    // passthrough and non-passthrough branches.
+    if (convertMaxTokens && key === 'max_tokens') {
+      cleaned['max_completion_tokens'] = value;
       continue;
     }
     if (passthroughTopLevel) {
-      // Convert max_tokens → max_completion_tokens for newer OpenAI models
-      if (convertMaxTokens && key === 'max_tokens') {
-        cleaned['max_completion_tokens'] = value;
-        continue;
-      }
       cleaned[key] = value;
       continue;
     }
     if (OPENAI_ONLY_FIELDS.has(key)) continue;
     if (key === 'max_completion_tokens') {
-      // Convert to max_tokens unless already set
-      if (!('max_tokens' in body)) cleaned['max_tokens'] = value;
+      // Preserve max_completion_tokens for endpoints that require it; otherwise
+      // downconvert to max_tokens for OpenAI-compatible providers that only know
+      // the legacy field name.
+      if (needsMaxCompletionTokens) {
+        cleaned[key] = value;
+      } else if (!('max_tokens' in body)) {
+        cleaned['max_tokens'] = value;
+      }
       continue;
     }
     cleaned[key] = value;

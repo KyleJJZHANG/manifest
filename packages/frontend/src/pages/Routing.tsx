@@ -1,48 +1,76 @@
-import { createSignal, createResource, createMemo, Show, type Component } from 'solid-js';
+import {
+  createSignal,
+  createResource,
+  createMemo,
+  createEffect,
+  Show,
+  type Component,
+} from 'solid-js';
 import { useLocation, useParams, useSearchParams } from '@solidjs/router';
 import { Title, Meta } from '@solidjs/meta';
 import RoutingModals from '../components/RoutingModals.js';
 import { buildPipelineHelp } from '../components/RoutingPipelineCard.js';
 import RoutingTabs from '../components/RoutingTabs.js';
+import ResponseModeModal from '../components/ResponseModeModal.js';
 import { toast } from '../services/toast-store.js';
 import { agentDisplayName } from '../services/agent-display-name.js';
+import SetupModal from '../components/SetupModal.jsx';
+import { isRecentlyCreated, isSetupPending, clearSetupPending } from '../services/recent-agents.js';
+import { agentPlatform, agentCategory } from '../services/agent-platform-store.js';
 import RoutingDefaultTierSection from './RoutingDefaultTierSection.js';
-import RoutingComplexitySection from './RoutingComplexitySection.js';
 import RoutingSpecificitySection from './RoutingSpecificitySection.js';
 import RoutingHeaderTiersSection from './RoutingHeaderTiersSection.js';
-import {
-  RoutingLoadingSkeleton,
-  EnableRoutingCard,
-  ActiveProviderIcons,
-  RoutingFooter,
-} from './RoutingPanels.js';
+import { RoutingLoadingSkeleton, ActiveProviderIcons, RoutingFooter } from './RoutingPanels.js';
 import { createRoutingActions } from './RoutingActions.js';
 import { listHeaderTiers, type HeaderTier } from '../services/api/header-tiers.js';
 import {
   getTierAssignments,
+  setTierResponseMode,
   getAvailableModels,
   getProviders,
   getCustomProviders,
+  getEnabledProviders,
   getSpecificityAssignments,
-  getComplexityStatus,
+  setSpecificityResponseMode,
   overrideSpecificity,
   resetSpecificity,
   refreshModels,
   getPricingHealth,
-  refreshPricing,
+  getComplexityStatus,
+  toggleComplexity,
+  listModelParams,
+  setModelParams as setModelParamsApi,
+  deleteModelParams,
+  modelParamsKey,
+  type AgentModelParamsRow,
+  type AuthType,
+  type RequestParamDefaults,
+  type ResponseMode,
 } from '../services/api.js';
-import {
-  parseCustomProviderParams,
-  parseProviderDeepLink,
-  type CustomProviderPrefill,
-  type ProviderDeepLink,
-} from '../services/routing-params.js';
+import { parseCustomProviderParams, parseProviderDeepLink } from '../services/routing-params.js';
+import { STAGES } from '../services/providers.js';
+// Route-scoped: keep the large routing stylesheet (and its sub-imports) out
+// of the global theme bundle so login/overview/etc. don't download it.
+import NoConnectionsPrompt from '../components/NoConnectionsPrompt.jsx';
+import '../styles/routing.css';
 
 const Routing: Component = () => {
   const params = useParams<{ agentName: string }>();
   const location = useLocation<{ openProviders?: boolean }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const agentName = () => decodeURIComponent(params.agentName);
+
+  // Newly created agents land on this tab; show the setup modal here too (it
+  // used to live only on Overview). The open gate keys off a persistent
+  // "setup pending" flag (localStorage) so the modal reliably reopens after a
+  // page refresh until the user dismisses or completes it. The in-memory
+  // `isRecentlyCreated` is kept as an in-session OR but is not required to
+  // survive reloads.
+  const [setupOpen, setSetupOpen] = createSignal(
+    (isSetupPending(agentName()) || isRecentlyCreated(agentName())) &&
+      !localStorage.getItem(`setup_completed_${params.agentName}`) &&
+      !localStorage.getItem(`setup_dismissed_${params.agentName}`),
+  );
 
   const customProviderPrefill = createMemo(() => parseCustomProviderParams(searchParams));
   const providerDeepLink = createMemo(() => parseProviderDeepLink(searchParams));
@@ -55,25 +83,190 @@ const Routing: Component = () => {
     () => agentName(),
     getAvailableModels,
   );
-  const [connectedProviders, { refetch: refetchProviders, mutate: mutateProviders }] =
-    createResource(() => agentName(), getProviders);
+  const [connectedProviders, { refetch: refetchProviders }] = createResource(
+    () => agentName(),
+    getProviders,
+  );
   const [customProviders, { refetch: refetchCustomProviders }] = createResource(
     () => agentName(),
     getCustomProviders,
   );
-  const [specificityAssignments, { refetch: refetchSpecificity }] = createResource(
+  const [enabledProviders, { refetch: refetchEnabledProviders }] = createResource(
     () => agentName(),
-    getSpecificityAssignments,
+    async (name) => getEnabledProviders(name).catch(() => ({ enabled: [] })),
   );
-  const [complexityStatus, { mutate: mutateComplexity }] = createResource(
-    () => agentName(),
-    getComplexityStatus,
-  );
-  const complexityEnabled = () => complexityStatus()?.enabled ?? false;
-  const [headerTiers, { refetch: refetchHeaderTiers }] = createResource(
+  const [specificityAssignments, { refetch: refetchSpecificity, mutate: mutateSpecificity }] =
+    createResource(() => agentName(), getSpecificityAssignments);
+  const [headerTiers, { refetch: refetchHeaderTiers, mutate: mutateHeaderTiers }] = createResource(
     () => agentName(),
     (name) => listHeaderTiers(name).catch(() => [] as HeaderTier[]),
   );
+  const [complexityStatus, { mutate: mutateComplexityStatus }] = createResource(
+    () => agentName(),
+    getComplexityStatus,
+  );
+  const [togglingComplexity, setTogglingComplexity] = createSignal(false);
+  const [changingDefaultResponseMode, setChangingDefaultResponseMode] = createSignal(false);
+  const [changingSpecificityResponseMode, setChangingSpecificityResponseMode] = createSignal(false);
+  const complexityEnabled = () => complexityStatus()?.enabled ?? true;
+
+  // Per-route model params, fetched once and threaded down. Scope separates
+  // default/complexity tiers, task-specific tiers, and custom header tiers so
+  // the same model can have different values in different routing surfaces.
+  const [modelParams, { mutate: mutateModelParams }] = createResource(
+    () => agentName(),
+    (name) => listModelParams(name).catch(() => [] as AgentModelParamsRow[]),
+  );
+  const modelParamsMap = createMemo(() => {
+    const map = new Map<string, RequestParamDefaults>();
+    for (const row of modelParams() ?? []) {
+      map.set(modelParamsKey(row.scope, row.provider, row.authType, row.model), row.params);
+    }
+    return map;
+  });
+  const getModelParamsFor = (
+    scope: string,
+    provider: string,
+    authType: AuthType,
+    model: string,
+  ): RequestParamDefaults | null =>
+    modelParamsMap().get(modelParamsKey(scope, provider, authType, model)) ?? null;
+
+  const setModelParamsFor = async (
+    scope: string,
+    provider: string,
+    authType: AuthType,
+    model: string,
+    next: RequestParamDefaults | null,
+  ): Promise<void> => {
+    if (next === null) {
+      // Dialog returns null when the user collapses back to the provider's
+      // natural default. Delete the row so the table stays clean and the
+      // dashboard snapshot reflects the provider default, not an explicit
+      // override.
+      await deleteModelParams(agentName(), { scope, provider, authType, model });
+      mutateModelParams((rows) =>
+        (rows ?? []).filter(
+          (r) =>
+            !(
+              r.scope === scope &&
+              r.provider.toLowerCase() === provider.toLowerCase() &&
+              r.authType === authType &&
+              r.model === model
+            ),
+        ),
+      );
+      return;
+    }
+    const saved = await setModelParamsApi(agentName(), {
+      scope,
+      provider,
+      authType,
+      model,
+      params: next,
+    });
+    mutateModelParams((rows) => {
+      const without = (rows ?? []).filter(
+        (r) =>
+          !(
+            r.scope === scope &&
+            r.provider.toLowerCase() === provider.toLowerCase() &&
+            r.authType === authType &&
+            r.model === model
+          ),
+      );
+      return [...without, saved];
+    });
+  };
+
+  const handleToggleComplexity = async () => {
+    const shouldInheritStreaming = defaultResponseMode() === 'stream';
+    setTogglingComplexity(true);
+    try {
+      const result = await toggleComplexity(agentName());
+      mutateComplexityStatus(result);
+      if (shouldInheritStreaming) {
+        await handleDefaultResponseModeChange('stream');
+      }
+    } catch {
+      toast.error('Failed to toggle complexity routing');
+    } finally {
+      setTogglingComplexity(false);
+    }
+  };
+
+  const defaultResponseMode = (): ResponseMode => {
+    const ids = complexityEnabled() ? STAGES.map((stage) => stage.id) : ['default'];
+    return ids.every((id) => actions.getTier(id)?.response_mode === 'stream')
+      ? 'stream'
+      : 'buffered';
+  };
+
+  const handleDefaultResponseModeChange = async (responseMode: ResponseMode) => {
+    const ids = complexityEnabled() ? STAGES.map((stage) => stage.id) : ['default'];
+    setChangingDefaultResponseMode(true);
+    try {
+      const updated = await Promise.all(
+        ids.map((tier) => setTierResponseMode(agentName(), tier, responseMode)),
+      );
+      mutateTiers((prev) => {
+        const byTier = new Map(updated.map((row) => [row.tier, row]));
+        const merged = (prev ?? []).map((row) => byTier.get(row.tier) ?? row);
+        for (const row of updated) {
+          if (!merged.some((existing) => existing.tier === row.tier)) merged.push(row);
+        }
+        return merged;
+      });
+      toast.success(
+        responseMode === 'stream'
+          ? 'Streaming response mode enabled'
+          : 'Buffered response mode enabled',
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update response mode');
+    } finally {
+      setChangingDefaultResponseMode(false);
+    }
+  };
+
+  const activeSpecificityAssignments = () =>
+    specificityAssignments()?.filter((assignment) => assignment.is_active) ?? [];
+
+  const specificityResponseMode = (): ResponseMode => {
+    const active = activeSpecificityAssignments();
+    return active.length > 0 && active.every((assignment) => assignment.response_mode === 'stream')
+      ? 'stream'
+      : 'buffered';
+  };
+
+  const handleSpecificityResponseModeChange = async (responseMode: ResponseMode) => {
+    const active = activeSpecificityAssignments();
+    if (active.length === 0) return;
+    setChangingSpecificityResponseMode(true);
+    try {
+      const updated = await Promise.all(
+        active.map((assignment) =>
+          setSpecificityResponseMode(agentName(), assignment.category, responseMode),
+        ),
+      );
+      mutateSpecificity((prev) => {
+        const byCategory = new Map(updated.map((row) => [row.category, row]));
+        return prev?.map((row) => byCategory.get(row.category) ?? row);
+      });
+      toast.success(
+        responseMode === 'stream'
+          ? 'Streaming response mode enabled'
+          : 'Buffered response mode enabled',
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update task-specific response mode',
+      );
+    } finally {
+      setChangingSpecificityResponseMode(false);
+    }
+  };
+
   const hasCustomTiersEnabled = () => headerTiers()?.some((t) => t.enabled) ?? false;
   const [dropdownTier, setDropdownTier] = createSignal<string | null>(null);
   const [specificityDropdown, setSpecificityDropdown] = createSignal<string | null>(null);
@@ -84,16 +277,28 @@ const Routing: Component = () => {
       !!customProviderPrefill() ||
       !!providerDeepLink(),
   );
-  const [confirmDisable, setConfirmDisable] = createSignal(false);
+  const [helpOpen, setHelpOpen] = createSignal(false);
+  const [responseModeModalOpen, setResponseModeModalOpen] = createSignal(false);
   const [instructionModal, setInstructionModal] = createSignal<'enable' | 'disable' | null>(null);
   const [instructionProvider, setInstructionProvider] = createSignal<string | null>(null);
   const [fallbackPickerTier, setFallbackPickerTier] = createSignal<string | null>(null);
   const [refreshingModels, setRefreshingModels] = createSignal(false);
-  const [pricingHealth, { refetch: refetchPricingHealth }] = createResource(getPricingHealth);
-  const [refreshingPricing, setRefreshingPricing] = createSignal(false);
-  const pricingCacheEmpty = () => (pricingHealth()?.model_count ?? 0) === 0;
+  const [pricingHealth] = createResource(getPricingHealth);
+  const [pricingWarningShown, setPricingWarningShown] = createSignal(false);
   const [wasEnabledBeforeModal, setWasEnabledBeforeModal] = createSignal(false);
   const [hadProvidersBeforeModal, setHadProvidersBeforeModal] = createSignal(false);
+
+  createEffect(() => {
+    const health = pricingHealth();
+    if (!health) return;
+    if (health.model_count > 0) {
+      setPricingWarningShown(false);
+      return;
+    }
+    if (pricingWarningShown()) return;
+    setPricingWarningShown(true);
+    toast.warning('Model pricing data is unavailable. Model cost details may be incomplete.');
+  });
 
   const refetchAll = async () => {
     await Promise.all([
@@ -103,6 +308,7 @@ const Routing: Component = () => {
       refetchModels(),
       refetchSpecificity(),
       refetchHeaderTiers(),
+      refetchEnabledProviders(),
     ]);
   };
 
@@ -110,8 +316,6 @@ const Routing: Component = () => {
     agentName,
     tiers,
     mutateTiers,
-    connectedProviders,
-    mutateProviders,
     refetchAll,
     setInstructionModal,
   });
@@ -131,16 +335,26 @@ const Routing: Component = () => {
     modelName,
     providerId,
     authType,
+    providerKeyLabel,
   ) => {
     setFallbackPickerTier(null);
     if (isSpecificityTier(tierId)) {
       const sa = specificityAssignments()?.find((a) => a.category === tierId);
-      const current = sa?.fallback_models ?? [];
+      const currentRoutes = sa?.fallback_routes ?? [];
+      const current = currentRoutes.map((r) => r.model);
       if (current.includes(modelName)) return;
       const updated = [...current, modelName];
+      // Pass explicit (provider, authType, model) routes so the backend can
+      // disambiguate when the same model id is offered by multiple connected
+      // providers (e.g. OpenAI subscription + OpenAI API key both expose
+      // gpt-4o). Without this the backend silently stores nothing.
+      const updatedRoutes =
+        authType !== undefined
+          ? [...currentRoutes, { provider: providerId, authType, model: modelName }]
+          : undefined;
       try {
         const { setSpecificityFallbacks } = await import('../services/api.js');
-        await setSpecificityFallbacks(agentName(), tierId, updated);
+        await setSpecificityFallbacks(agentName(), tierId, updated, updatedRoutes);
         await refetchSpecificity();
         toast.success('Fallback added');
       } catch {
@@ -148,13 +362,16 @@ const Routing: Component = () => {
       }
       return;
     }
-    return actions.handleAddFallback(tierId, modelName, providerId, authType);
+    return actions.handleAddFallback(tierId, modelName, providerId, authType, providerKeyLabel);
   };
 
-  const isEnabled = () => connectedProviders()?.some((p) => p.is_active) ?? false;
-  const hadRouting = () => (connectedProviders()?.length ?? 0) > 0 && !isEnabled();
-  const activeProviders = () => connectedProviders()?.filter((p) => p.is_active) ?? [];
-  const hasOverrides = () => tiers()?.some((t) => t.override_model !== null) ?? false;
+  const enabledProviderIds = () => new Set(enabledProviders()?.enabled ?? []);
+  const enabledConnectedProviders = () =>
+    (connectedProviders() ?? []).filter((provider) => enabledProviderIds().has(provider.id));
+  const isEnabled = () => enabledConnectedProviders().some((p) => p.is_active);
+  const activeProviders = () => enabledConnectedProviders().filter((p) => p.is_active);
+  const hasProviders = () => activeProviders().length > 0;
+  const hasOverrides = () => tiers()?.some((t) => t.override_route !== null) ?? false;
 
   const openProviderModal = () => {
     setWasEnabledBeforeModal(isEnabled());
@@ -182,6 +399,62 @@ const Routing: Component = () => {
     await refetchAll();
   };
 
+  const handleProviderPoll = async () => {
+    await refetchProviders();
+  };
+
+  const handleSpecificityOverride = async (
+    category: string,
+    model: string,
+    provider: string,
+    authType?: 'api_key' | 'subscription' | 'local',
+    providerKeyLabel?: string,
+  ) => {
+    setChangingSpecificity(category);
+    try {
+      await overrideSpecificity(agentName(), category, model, provider, authType, providerKeyLabel);
+      await refetchSpecificity();
+    } catch {
+      toast.error('Failed to update specificity model');
+    } finally {
+      setChangingSpecificity(null);
+    }
+  };
+
+  /**
+   * Pin a task-specific (specificity) tier to a labeled provider key.
+   * Re-uses the same PUT endpoint as `handleSpecificityOverride` — the
+   * model/provider/auth_type stay the same, only the key label changes.
+   */
+  const handleSpecificityPinKey = async (
+    category: string,
+    provider: string,
+    providerKeyLabel: string | null,
+    authType?: 'api_key' | 'subscription' | 'local',
+  ) => {
+    const assignment = specificityAssignments()?.find((a) => a.category === category);
+    const effective = assignment?.override_route ?? null;
+    const model = effective?.model;
+    if (!assignment || !model || !provider) return;
+    setChangingSpecificity(category);
+    try {
+      await overrideSpecificity(
+        agentName(),
+        category,
+        model,
+        provider,
+        authType ?? effective?.authType,
+        providerKeyLabel ?? undefined,
+      );
+      await refetchSpecificity();
+      toast.success(providerKeyLabel ? `Pinned to "${providerKeyLabel}" key` : 'Key pin cleared');
+    } catch {
+      // toast handled upstream
+    } finally {
+      setChangingSpecificity(null);
+    }
+  };
+
   return (
     <div class="container--lg">
       <Title>{agentDisplayName() ?? agentName()} Routing - Manifest</Title>
@@ -190,122 +463,71 @@ const Routing: Component = () => {
         content={`Configure model routing for ${agentDisplayName() ?? agentName()}.`}
       />
 
-      <div class="page-header routing-page-header">
-        <div>
-          <h1>Routing</h1>
-          <span class="breadcrumb">
-            {agentDisplayName() ?? agentName()} &rsaquo; Pick which model handles each type of
-            request
-          </span>
-        </div>
-        <Show when={!connectedProviders.loading && isEnabled()}>
-          <div style="display: flex; gap: 8px;">
-            <button
-              class="btn btn--outline btn--sm"
-              disabled={refreshingModels()}
-              onClick={async () => {
-                setRefreshingModels(true);
-                try {
-                  await refreshModels(agentName());
-                  refetchModels();
-                  refetchTiers();
-                  toast.success('Models refreshed');
-                } catch {
-                  toast.error('Failed to refresh models');
-                } finally {
-                  setRefreshingModels(false);
-                }
-              }}
-            >
-              {refreshingModels() ? 'Refreshing...' : 'Refresh models'}
-            </button>
-            <button class="btn btn--primary btn--sm" onClick={openProviderModal}>
-              Connect providers
-            </button>
-          </div>
-        </Show>
-      </div>
-
-      <Show when={pricingHealth() && pricingCacheEmpty()}>
-        <div
-          class="panel"
-          role="alert"
-          style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; border-left: 3px solid var(--color-warning, #d97706);"
-        >
-          <div>
-            <strong>Pricing catalog is empty.</strong>{' '}
-            <span>
-              Manifest couldn't reach openrouter.ai at startup, so no models will be auto-assigned
-              to tiers. Retry below, or check outbound network access to openrouter.ai.
-            </span>
-          </div>
-          <button
-            class="btn btn--outline btn--sm"
-            disabled={refreshingPricing()}
-            onClick={async () => {
-              setRefreshingPricing(true);
-              try {
-                const res = await refreshPricing();
-                await refetchPricingHealth();
-                if (res.ok) {
-                  toast.success(`Pricing catalog loaded (${res.model_count} models)`);
-                  await refetchModels();
-                  await refetchTiers();
-                } else {
-                  toast.error('Pricing refresh failed — check backend logs');
-                }
-              } catch {
-                toast.error('Pricing refresh failed');
-              } finally {
-                setRefreshingPricing(false);
-              }
-            }}
-          >
-            {refreshingPricing() ? 'Retrying...' : 'Retry pricing sync'}
-          </button>
-        </div>
-      </Show>
-
       <Show
-        when={!connectedProviders.loading}
-        fallback={
-          <Show
-            when={
-              connectedProviders() !== undefined && connectedProviders()?.some((p) => p.is_active)
-            }
-            fallback={
-              <div
-                class="panel"
-                style="display: flex; align-items: center; justify-content: center; min-height: 260px;"
-              >
-                <span
-                  class="spinner"
-                  style="width: 24px; height: 24px;"
-                  role="status"
-                  aria-label="Loading"
-                />
-              </div>
-            }
-          >
-            <RoutingLoadingSkeleton />
-          </Show>
-        }
+        when={!connectedProviders.loading && !enabledProviders.loading}
+        fallback={<RoutingLoadingSkeleton />}
       >
-        <Show when={isEnabled()} fallback={<EnableRoutingCard onEnable={openProviderModal} />}>
-          <ActiveProviderIcons
-            activeProviders={activeProviders}
-            customProviders={() => customProviders() ?? []}
-          />
+        <Show when={hasProviders()} fallback={<NoConnectionsPrompt />}>
+          {/* Provider icons + action buttons in a single row */}
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+            <Show when={isEnabled()}>
+              <ActiveProviderIcons
+                activeProviders={activeProviders}
+                customProviders={() => customProviders() ?? []}
+              />
+            </Show>
+            <div style="display: flex; gap: 8px; margin-left: auto;">
+              <Show when={isEnabled()}>
+                <button
+                  class="btn btn--outline btn--sm"
+                  disabled={refreshingModels()}
+                  onClick={async () => {
+                    setRefreshingModels(true);
+                    try {
+                      await refreshModels(agentName());
+                      refetchModels();
+                      refetchTiers();
+                      toast.success('Models refreshed');
+                    } catch {
+                      toast.error('Failed to refresh models');
+                    } finally {
+                      setRefreshingModels(false);
+                    }
+                  }}
+                >
+                  {refreshingModels() ? 'Refreshing...' : 'Refresh models'}
+                </button>
+              </Show>
+              <button class="response-mode-btn" onClick={() => setResponseModeModalOpen(true)}>
+                <span class="response-mode-btn__icon">
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                </span>
+                Response mode: {defaultResponseMode() === 'stream' ? 'Stream' : 'Buffered'}
+              </button>
+            </div>
+          </div>
 
           <RoutingTabs
-            complexityEnabled={complexityEnabled}
             specificityEnabled={hasAnySpecificityActive}
             customEnabled={hasCustomTiersEnabled}
             pipelineHelp={() =>
               buildPipelineHelp(
-                complexityEnabled(),
                 hasAnySpecificityActive(),
                 hasCustomTiersEnabled(),
+                complexityEnabled(),
               )
             }
           >
@@ -314,11 +536,10 @@ const Routing: Component = () => {
                 <RoutingDefaultTierSection
                   agentName={agentName}
                   tier={() => actions.getTier('default')}
-                  complexityEnabled={complexityEnabled}
                   models={() => models() ?? []}
                   customProviders={() => customProviders() ?? []}
                   activeProviders={activeProviders}
-                  connectedProviders={() => connectedProviders() ?? []}
+                  connectedProviders={enabledConnectedProviders}
                   tiersLoading={tiers.loading}
                   changingTier={actions.changingTier}
                   resettingTier={actions.resettingTier}
@@ -326,36 +547,21 @@ const Routing: Component = () => {
                   addingFallback={actions.addingFallback}
                   onDropdownOpen={(tierId) => setDropdownTier(tierId)}
                   onOverride={handleOverride}
-                  onReset={actions.handleReset}
-                  onFallbackUpdate={actions.handleFallbackUpdate}
-                  onAddFallback={(tierId) => setFallbackPickerTier(tierId)}
-                  getFallbacksFor={actions.getFallbacksFor}
-                  embedded
-                />
-              ),
-              complexity: (
-                <RoutingComplexitySection
-                  agentName={agentName}
-                  enabled={complexityEnabled}
-                  onEnabledChange={(next) => mutateComplexity({ enabled: next })}
-                  tiers={() => tiers() ?? []}
-                  models={() => models() ?? []}
-                  customProviders={() => customProviders() ?? []}
-                  activeProviders={activeProviders}
-                  connectedProviders={() => connectedProviders() ?? []}
-                  tiersLoading={tiers.loading}
-                  changingTier={actions.changingTier}
-                  resettingTier={actions.resettingTier}
-                  resettingAll={actions.resettingAll}
-                  addingFallback={actions.addingFallback}
-                  onDropdownOpen={(tierId) => setDropdownTier(tierId)}
-                  onOverride={handleOverride}
+                  onPinKey={actions.handlePinKey}
                   onReset={actions.handleReset}
                   onFallbackUpdate={actions.handleFallbackUpdate}
                   onAddFallback={(tierId) => setFallbackPickerTier(tierId)}
                   getFallbacksFor={actions.getFallbacksFor}
                   getTier={actions.getTier}
+                  complexityEnabled={complexityEnabled}
+                  togglingComplexity={togglingComplexity}
+                  onToggleComplexity={handleToggleComplexity}
+                  responseMode={defaultResponseMode}
+                  changingResponseMode={changingDefaultResponseMode}
+                  onResponseModeChange={handleDefaultResponseModeChange}
                   embedded
+                  getModelParams={getModelParamsFor}
+                  setModelParams={setModelParamsFor}
                 />
               ),
               specificity: (
@@ -365,23 +571,14 @@ const Routing: Component = () => {
                   models={() => models() ?? []}
                   customProviders={() => customProviders() ?? []}
                   activeProviders={activeProviders}
-                  connectedProviders={() => connectedProviders() ?? []}
+                  connectedProviders={enabledConnectedProviders}
                   changingTier={changingSpecificity}
                   resettingTier={resettingSpecificity}
                   resettingAll={() => false}
                   addingFallback={() => null}
                   onDropdownOpen={(category) => setSpecificityDropdown(category)}
-                  onOverride={async (category, model, provider, authType) => {
-                    setChangingSpecificity(category);
-                    try {
-                      await overrideSpecificity(agentName(), category, model, provider, authType);
-                      await refetchSpecificity();
-                    } catch {
-                      toast.error('Failed to update model');
-                    } finally {
-                      setChangingSpecificity(null);
-                    }
-                  }}
+                  onOverride={handleSpecificityOverride}
+                  onPinKey={handleSpecificityPinKey}
                   onReset={async (category) => {
                     setResettingSpecificity(category);
                     try {
@@ -393,26 +590,27 @@ const Routing: Component = () => {
                       setResettingSpecificity(null);
                     }
                   }}
-                  onFallbackUpdate={async (category, updatedFallbacks) => {
-                    try {
-                      if (updatedFallbacks.length === 0) {
-                        const { clearSpecificityFallbacks } = await import('../services/api.js');
-                        await clearSpecificityFallbacks(agentName(), category);
-                      } else {
-                        const { setSpecificityFallbacks } = await import('../services/api.js');
-                        await setSpecificityFallbacks(agentName(), category, updatedFallbacks);
-                      }
-                      await refetchSpecificity();
-                    } catch {
-                      toast.error('Failed to update fallbacks');
-                    }
+                  onFallbackUpdate={(category, _updatedFallbacks, updatedRoutes) => {
+                    // Optimistic local state mutation only. Persistence is
+                    // handled by RoutingTierCard via persistFallbacks (with
+                    // routes), so a second network call here would race the
+                    // first and drop route metadata for ambiguous models.
+                    if (updatedRoutes === undefined) return;
+                    mutateSpecificity((prev) =>
+                      prev?.map((a) =>
+                        a.category === category ? { ...a, fallback_routes: updatedRoutes } : a,
+                      ),
+                    );
                   }}
                   onAddFallback={(category) => setFallbackPickerTier(category)}
+                  responseMode={specificityResponseMode}
+                  changingResponseMode={changingSpecificityResponseMode}
+                  onResponseModeChange={handleSpecificityResponseModeChange}
                   refetchAll={refetchAll}
-                  refetchSpecificity={async () => {
-                    await refetchSpecificity();
-                  }}
+                  refetchSpecificity={() => refetchSpecificity() as unknown as Promise<void>}
                   embedded
+                  getModelParams={getModelParamsFor}
+                  setModelParams={setModelParamsFor}
                 />
               ),
               custom: (
@@ -420,37 +618,84 @@ const Routing: Component = () => {
                   agentName={agentName}
                   models={() => models() ?? []}
                   customProviders={() => customProviders() ?? []}
-                  connectedProviders={() => connectedProviders() ?? []}
+                  connectedProviders={enabledConnectedProviders}
                   externalTiers={() => headerTiers()}
                   externalRefetch={() => void refetchHeaderTiers()}
+                  externalMutate={mutateHeaderTiers}
                   embedded
+                  getModelParams={getModelParamsFor}
+                  setModelParams={setModelParamsFor}
                 />
               ),
             }}
           </RoutingTabs>
 
           <RoutingFooter
-            disabling={actions.disabling}
             hasOverrides={hasOverrides}
             resettingAll={actions.resettingAll}
             resettingTier={actions.resettingTier}
-            onDisable={() => setConfirmDisable(true)}
             onResetAll={actions.handleResetAll}
             onShowInstructions={() => setInstructionModal('enable')}
+            onShowHowRoutingWorks={() => setHelpOpen(true)}
           />
+
+          <Show when={helpOpen()}>
+            {(() => {
+              const content = buildPipelineHelp(
+                hasAnySpecificityActive(),
+                hasCustomTiersEnabled(),
+                complexityEnabled(),
+              );
+              if (!content) return null;
+              return (
+                <div
+                  class="modal-overlay"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setHelpOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setHelpOpen(false);
+                  }}
+                >
+                  <div
+                    class="modal-card"
+                    style="max-width: 480px;"
+                    role="dialog"
+                    aria-modal="true"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <h2 style="margin: 0 0 16px; font-size: var(--font-size-lg); font-weight: 600;">
+                      How routing works
+                    </h2>
+                    {content}
+                    <div style="display: flex; justify-content: flex-end; margin-top: 16px;">
+                      <button class="btn btn--primary btn--sm" onClick={() => setHelpOpen(false)}>
+                        Got it
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </Show>
         </Show>
       </Show>
 
-      <Show when={hadRouting()}>
-        <div class="routing-footer" style="margin-top: 0;">
-          <div style="flex: 1;" />
-          <button
-            class="routing-footer__instructions"
-            onClick={() => setInstructionModal('disable')}
-          >
-            Setup instructions
-          </button>
-        </div>
+      <Show when={responseModeModalOpen()}>
+        <ResponseModeModal
+          responseMode={defaultResponseMode}
+          onResponseModeChange={async (mode) => {
+            await handleDefaultResponseModeChange(mode);
+          }}
+          disabled={changingDefaultResponseMode}
+          tiers={tiers() ?? []}
+          models={models() ?? []}
+          onClose={() => setResponseModeModalOpen(false)}
+          onReplace={(tierId) => {
+            setResponseModeModalOpen(false);
+            setDropdownTier(tierId);
+          }}
+        />
       </Show>
 
       <RoutingModals
@@ -459,17 +704,9 @@ const Routing: Component = () => {
         onDropdownClose={() => setDropdownTier(null)}
         specificityDropdown={specificityDropdown}
         onSpecificityDropdownClose={() => setSpecificityDropdown(null)}
-        onSpecificityOverride={async (category, model, provider, authType) => {
+        onSpecificityOverride={(category, model, provider, authType) => {
           setSpecificityDropdown(null);
-          setChangingSpecificity(category);
-          try {
-            await overrideSpecificity(agentName(), category, model, provider, authType);
-            await refetchSpecificity();
-          } catch {
-            toast.error('Failed to update specificity model');
-          } finally {
-            setChangingSpecificity(null);
-          }
+          void handleSpecificityOverride(category, model, provider, authType);
         }}
         fallbackPickerTier={fallbackPickerTier}
         onFallbackPickerClose={() => setFallbackPickerTier(null)}
@@ -483,28 +720,40 @@ const Routing: Component = () => {
           setInstructionModal(null);
           setInstructionProvider(null);
         }}
-        confirmDisable={confirmDisable}
-        disabling={actions.disabling}
-        onDisableCancel={() => setConfirmDisable(false)}
-        onDisableConfirm={async () => {
-          setConfirmDisable(false);
-          await actions.handleDisable();
-        }}
         models={() => models() ?? []}
         tiers={() => tiers() ?? []}
         specificityAssignments={() => specificityAssignments() ?? []}
         customProviders={() => customProviders() ?? []}
-        connectedProviders={() => connectedProviders() ?? []}
+        connectedProviders={enabledConnectedProviders}
         getTier={(tierId) => {
           const generalist = actions.getTier(tierId);
           if (generalist) return generalist;
           const sa = specificityAssignments()?.find((a) => a.category === tierId);
-          if (sa) return { ...sa, tier: sa.category };
-          return undefined;
+          return sa ? { ...sa, tier: sa.category } : undefined;
         }}
         onOverride={handleOverride}
         onAddFallback={handleAddFallback}
         onProviderUpdate={handleProviderUpdate}
+        onProviderPoll={handleProviderPoll}
+        onOpenProviderModal={openProviderModal}
+      />
+
+      <SetupModal
+        open={setupOpen()}
+        agentName={agentName()}
+        apiKey={(location.state as { newApiKey?: string } | undefined)?.newApiKey ?? null}
+        agentPlatform={agentPlatform()}
+        agentCategory={agentCategory()}
+        onClose={() => {
+          localStorage.setItem(`setup_dismissed_${params.agentName}`, '1');
+          clearSetupPending(agentName());
+          setSetupOpen(false);
+        }}
+        onDone={() => {
+          localStorage.setItem(`setup_completed_${params.agentName}`, '1');
+          clearSetupPending(agentName());
+          setSetupOpen(false);
+        }}
       />
     </div>
   );

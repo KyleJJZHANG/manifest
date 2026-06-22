@@ -3,8 +3,10 @@ import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import {
   CreateCustomProviderDto,
+  ProbeCustomProviderDto,
   UpdateCustomProviderDto,
   CustomProviderModelDto,
+  CUSTOM_PROVIDER_MODEL_LIMIT,
 } from './custom-provider.dto';
 
 function toDto(data: Record<string, unknown>): CreateCustomProviderDto {
@@ -13,6 +15,10 @@ function toDto(data: Record<string, unknown>): CreateCustomProviderDto {
 
 function toUpdateDto(data: Record<string, unknown>): UpdateCustomProviderDto {
   return plainToInstance(UpdateCustomProviderDto, data);
+}
+
+function makeModels(count: number): CustomProviderModelDto[] {
+  return Array.from({ length: count }, (_, i) => ({ model_name: `model-${i + 1}` }));
 }
 
 describe('CreateCustomProviderDto', () => {
@@ -76,6 +82,16 @@ describe('CreateCustomProviderDto', () => {
     expect(nameError).toBeDefined();
   });
 
+  it('accepts a dot in the name (e.g. "llama.cpp")', async () => {
+    const dto = toDto({
+      name: 'llama.cpp',
+      base_url: 'http://localhost:8080/v1',
+      models: [{ model_name: 'qwen2.5-0.5b-q4.gguf' }],
+    });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
   it('rejects name longer than 50 chars', async () => {
     const dto = toDto({
       name: 'a'.repeat(51),
@@ -94,6 +110,26 @@ describe('CreateCustomProviderDto', () => {
     });
     const errors = await validate(dto);
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('accepts large custom provider catalogs', async () => {
+    const dto = toDto({
+      name: 'Mammouth',
+      base_url: 'https://api.mammouth.ai/v1',
+      models: makeModels(73),
+    });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects custom provider catalogs above the configured limit', async () => {
+    const dto = toDto({
+      name: 'Too Large',
+      base_url: 'https://api.example.com/v1',
+      models: makeModels(CUSTOM_PROVIDER_MODEL_LIMIT + 1),
+    });
+    const errors = await validate(dto);
+    expect(errors.some((e) => e.property === 'models')).toBe(true);
   });
 
   it('rejects missing base_url', async () => {
@@ -142,6 +178,14 @@ describe('UpdateCustomProviderDto', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('accepts large model catalog updates', async () => {
+    const dto = toUpdateDto({
+      models: makeModels(73),
+    });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
   it('accepts empty object (no fields)', async () => {
     const dto = toUpdateDto({});
     const errors = await validate(dto);
@@ -158,5 +202,55 @@ describe('UpdateCustomProviderDto', () => {
     const dto = toUpdateDto({ models: [] });
     const errors = await validate(dto);
     expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('api_kind validation', () => {
+  it('accepts "openai" and "anthropic" on create', async () => {
+    for (const api_kind of ['openai', 'anthropic']) {
+      const dto = toDto({
+        name: 'Test',
+        base_url: 'https://api.example.com/v1',
+        api_kind,
+        models: [{ model_name: 'm' }],
+      });
+      const errors = await validate(dto);
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('rejects unknown api_kind values on create', async () => {
+    const dto = toDto({
+      name: 'Test',
+      base_url: 'https://api.example.com/v1',
+      api_kind: 'google',
+      models: [{ model_name: 'm' }],
+    });
+    const errors = await validate(dto);
+    expect(errors.some((e) => e.property === 'api_kind')).toBe(true);
+  });
+
+  it('accepts api_kind on update', async () => {
+    const dto = toUpdateDto({ api_kind: 'anthropic' });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts api_kind on probe payload', async () => {
+    const dto = plainToInstance(ProbeCustomProviderDto, {
+      base_url: 'https://api.anthropic.com',
+      api_kind: 'anthropic',
+    });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects unknown api_kind on probe payload', async () => {
+    const dto = plainToInstance(ProbeCustomProviderDto, {
+      base_url: 'https://api.example.com',
+      api_kind: 'bogus',
+    });
+    const errors = await validate(dto);
+    expect(errors.some((e) => e.property === 'api_kind')).toBe(true);
   });
 });

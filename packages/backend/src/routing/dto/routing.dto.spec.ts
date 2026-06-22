@@ -5,7 +5,11 @@ import {
   AgentNameParamDto,
   ConnectProviderDto,
   CopilotPollDto,
+  ModelRouteDto,
+  SetOverrideDto,
+  SetResponseModeDto,
   SetFallbacksDto,
+  responseModeFromDto,
 } from './routing.dto';
 
 function toDto(data: Record<string, unknown>): AgentNameParamDto {
@@ -204,5 +208,62 @@ describe('SetFallbacksDto', () => {
     const dto = toFallbacksDto({});
     const errors = await validate(dto);
     expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('SetResponseModeDto', () => {
+  function toResponseModeDto(data: Record<string, unknown>): SetResponseModeDto {
+    return plainToInstance(SetResponseModeDto, data);
+  }
+
+  it('accepts the response_mode body field', async () => {
+    const dto = toResponseModeDto({ response_mode: 'stream' });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+    expect(responseModeFromDto(dto)).toBe('stream');
+  });
+
+  it('accepts the legacy responseMode body field', async () => {
+    const dto = toResponseModeDto({ responseMode: 'stream' });
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+    expect(responseModeFromDto(dto)).toBe('stream');
+  });
+
+  it('rejects invalid mode values', async () => {
+    const dto = toResponseModeDto({ response_mode: 'instant' });
+    const errors = await validate(dto);
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('routing.dto decorator transforms', () => {
+  it('ModelRouteDto trims keyLabel', () => {
+    const dto = plainToInstance(ModelRouteDto, {
+      provider: 'openai',
+      authType: 'api_key',
+      model: 'gpt-4o',
+      keyLabel: '  Work  ',
+    });
+    expect(dto.keyLabel).toBe('Work');
+  });
+
+  it('SetOverrideDto trims providerKeyLabel and parses the nested route', () => {
+    const dto = plainToInstance(SetOverrideDto, {
+      model: 'gpt-4o',
+      providerKeyLabel: '  Work  ',
+      route: { provider: 'openai', authType: 'api_key', model: 'gpt-4o' },
+    });
+    expect(dto.providerKeyLabel).toBe('Work');
+    expect(dto.route?.model).toBe('gpt-4o');
+  });
+
+  it('SetFallbacksDto parses nested routes', async () => {
+    const dto = plainToInstance(SetFallbacksDto, {
+      models: ['gpt-4o'],
+      routes: [{ provider: 'openai', authType: 'api_key', model: 'gpt-4o' }],
+    });
+    expect(dto.routes).toHaveLength(1);
+    expect(await validate(dto)).toHaveLength(0);
   });
 });

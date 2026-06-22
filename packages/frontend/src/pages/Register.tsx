@@ -1,8 +1,9 @@
 import { A } from '@solidjs/router';
 import { Title, Meta } from '@solidjs/meta';
-import { type Component, createSignal, onMount, Show } from 'solid-js';
+import { type Component, createSignal, createUniqueId, onCleanup, onMount, Show } from 'solid-js';
 import SocialButtons from '../components/SocialButtons.jsx';
 import { authClient } from '../services/auth-client.js';
+import { getLastAuthMethod, setLastAuthMethod } from '../services/last-auth-method.js';
 import { checkSocialProviders } from '../services/setup-status.js';
 
 const RESEND_COOLDOWN_SECONDS = 60;
@@ -17,23 +18,36 @@ const Register: Component = () => {
   const [alreadyExists, setAlreadyExists] = createSignal(false);
   const [resendCooldown, setResendCooldown] = createSignal(0);
   const [socialProviders, setSocialProviders] = createSignal<string[]>([]);
+  const [lastAuthMethod] = createSignal(getLastAuthMethod());
+  const nameId = createUniqueId();
+  const emailId = createUniqueId();
+  const passwordId = createUniqueId();
+  const errorId = createUniqueId();
 
   onMount(async () => {
     setSocialProviders(await checkSocialProviders());
   });
 
+  let cooldownInterval: ReturnType<typeof setInterval> | undefined;
+
   const startCooldown = () => {
     setResendCooldown(RESEND_COOLDOWN_SECONDS);
-    const interval = setInterval(() => {
+    if (cooldownInterval) clearInterval(cooldownInterval);
+    cooldownInterval = setInterval(() => {
       setResendCooldown((prev) => {
         if (prev <= 1) {
-          clearInterval(interval);
+          clearInterval(cooldownInterval);
+          cooldownInterval = undefined;
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
   };
+
+  onCleanup(() => {
+    if (cooldownInterval) clearInterval(cooldownInterval);
+  });
 
   const handleSubmit = async (e: Event) => {
     e.preventDefault();
@@ -56,6 +70,7 @@ const Register: Component = () => {
       return;
     }
     setAlreadyExists(false);
+    setLastAuthMethod('email');
 
     if (data?.token) {
       window.location.href = '/';
@@ -87,7 +102,7 @@ const Register: Component = () => {
       <Title>Sign Up - Manifest</Title>
       <Meta
         name="description"
-        content="Create a Manifest account to start monitoring your AI agents."
+        content="Create a Manifest account to start monitoring your AI harnesses."
       />
       <Show
         when={emailSent()}
@@ -95,10 +110,10 @@ const Register: Component = () => {
           <>
             <div class="auth-header">
               <h1 class="auth-header__title">Create an account</h1>
-              <p class="auth-header__subtitle">Monitor your AI agents' costs and usage</p>
+              <p class="auth-header__subtitle">Monitor your AI harnesses' costs and usage</p>
             </div>
 
-            <SocialButtons enabledProviders={socialProviders()} />
+            <SocialButtons enabledProviders={socialProviders()} lastUsed={lastAuthMethod()} />
 
             <Show when={socialProviders().length > 0}>
               <div class="auth-divider">
@@ -108,7 +123,7 @@ const Register: Component = () => {
 
             <form class="auth-form" onSubmit={handleSubmit}>
               <Show when={alreadyExists()}>
-                <div class="auth-form__error" role="alert">
+                <div id={errorId} class="auth-form__error" role="alert">
                   An account with this email already exists.{' '}
                   <A href="/login" class="auth-form__error-link">
                     Sign in
@@ -121,42 +136,52 @@ const Register: Component = () => {
                 </div>
               </Show>
               <Show when={error() && !alreadyExists()}>
-                <div class="auth-form__error" role="alert">
+                <div id={errorId} class="auth-form__error" role="alert">
                   {error()}
                 </div>
               </Show>
-              <label class="auth-form__label">
+              <label class="auth-form__label" for={nameId}>
                 Name
                 <input
+                  ref={(el) => requestAnimationFrame(() => el.focus())}
+                  id={nameId}
                   class="auth-form__input"
                   type="text"
+                  autocomplete="name"
                   placeholder="Your name"
                   value={name()}
                   onInput={(e) => setName(e.currentTarget.value)}
                   required
+                  aria-describedby={error() ? errorId : undefined}
                 />
               </label>
-              <label class="auth-form__label">
+              <label class="auth-form__label" for={emailId}>
                 Email
                 <input
+                  id={emailId}
                   class="auth-form__input"
                   type="email"
+                  autocomplete="email"
                   placeholder="you@example.com"
                   value={email()}
                   onInput={(e) => setEmail(e.currentTarget.value)}
                   required
+                  aria-describedby={error() ? errorId : undefined}
                 />
               </label>
-              <label class="auth-form__label">
+              <label class="auth-form__label" for={passwordId}>
                 Password
                 <input
+                  id={passwordId}
                   class="auth-form__input"
                   type="password"
+                  autocomplete="new-password"
                   placeholder="Create a password"
                   value={password()}
                   onInput={(e) => setPassword(e.currentTarget.value)}
                   required
                   minLength={8}
+                  aria-describedby={error() ? errorId : undefined}
                 />
               </label>
               <button class="auth-form__submit" type="submit" disabled={loading()}>
@@ -165,11 +190,21 @@ const Register: Component = () => {
             </form>
             <p class="auth-terms">
               By signing up, you agree to our{' '}
-              <a href="#" class="auth-terms__link">
+              <a
+                href="https://manifest.build/terms"
+                class="auth-terms__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 Terms
               </a>{' '}
               and{' '}
-              <a href="#" class="auth-terms__link">
+              <a
+                href="https://manifest.build/privacy"
+                class="auth-terms__link"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 Privacy Policy
               </a>
             </p>

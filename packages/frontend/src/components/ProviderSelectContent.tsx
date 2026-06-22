@@ -1,4 +1,4 @@
-import { createSignal, Show, type Component } from 'solid-js';
+import { createEffect, createSignal, onMount, Show, type Component } from 'solid-js';
 import { normalizeProviderName } from 'manifest-shared';
 import { PROVIDERS, type ProviderDef } from '../services/providers.js';
 import {
@@ -10,12 +10,11 @@ import {
 } from '../services/api.js';
 import { toast } from '../services/toast-store.js';
 import type { CustomProviderPrefill, ProviderDeepLink } from '../services/routing-params.js';
+import { checkIsSelfHosted } from '../services/setup-status.js';
 import CustomProviderForm from './CustomProviderForm.js';
 import CopilotDeviceLogin from './CopilotDeviceLogin.js';
 import LocalServerDetailView from './LocalServerDetailView.js';
 import ProviderDetailView from './ProviderDetailView.js';
-import ProviderApiKeyTab from './ProviderApiKeyTab.js';
-import ProviderSubscriptionTab from './ProviderSubscriptionTab.js';
 
 export interface ProviderSelectContentProps {
   agentName: string;
@@ -23,7 +22,9 @@ export interface ProviderSelectContentProps {
   customProviders?: CustomProviderData[];
   customProviderPrefill?: CustomProviderPrefill | null;
   providerDeepLink?: ProviderDeepLink | null;
+  initialTab?: 'subscription' | 'api_key' | 'local';
   onUpdate: () => void | Promise<void>;
+  onPollProviders?: () => void | Promise<void>;
   onClose?: () => void;
   showHeader?: boolean;
   showFooter?: boolean;
@@ -38,13 +39,39 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
 
   const deepLink = props.providerDeepLink;
   const deepLinkProv = deepLink ? PROVIDERS.find((p) => p.id === deepLink.providerId) : null;
+  // A `custom:<id>` deep link can't resolve to a standard PROVIDERS entry; it
+  // targets a custom provider whose editor we open directly (see onMount below).
+  const deepLinkCustomId = deepLink?.providerId.startsWith('custom:')
+    ? deepLink.providerId.slice('custom:'.length)
+    : null;
 
-  const [activeTab, setActiveTab] = createSignal<'subscription' | 'api_key'>('subscription');
+  const [activeTab, setActiveTab] = createSignal<'subscription' | 'api_key' | 'local'>(
+    deepLink?.authType ?? props.initialTab ?? 'subscription',
+  );
+  const [isSelfHosted, setIsSelfHosted] = createSignal(false);
+  onMount(async () => {
+    setIsSelfHosted(await checkIsSelfHosted());
+  });
+  // Custom-provider deep link: open the custom editor for the matching id
+  // instead of leaving the modal on the provider list (which can't resolve a
+  // `custom:` id). An effect (not onMount) covers custom providers that load
+  // asynchronously after the modal opens; the guard fires it at most once.
+  let customDeepLinkOpened = false;
+  if (deepLinkCustomId) {
+    createEffect(() => {
+      if (customDeepLinkOpened) return;
+      const cp = (props.customProviders ?? []).find((c) => c.id === deepLinkCustomId);
+      if (cp) {
+        customDeepLinkOpened = true;
+        openEditCustom(cp);
+      }
+    });
+  }
   const [selectedProvider, setSelectedProvider] = createSignal<string | null>(
     deepLinkProv ? deepLinkProv.id : null,
   );
   const [selectedAuthType, setSelectedAuthType] = createSignal<AuthType>(
-    deepLinkProv?.subscriptionOnly ? 'subscription' : 'api_key',
+    deepLink?.authType ?? (deepLinkProv?.subscriptionOnly ? 'subscription' : 'api_key'),
   );
   const [showCustomForm, setShowCustomForm] = createSignal(!!props.customProviderPrefill);
   const [tilePrefill, setTilePrefill] = createSignal<CustomProviderPrefill | null>(null);
@@ -60,14 +87,21 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
   const [editing, setEditing] = createSignal(false);
   const [validationError, setValidationError] = createSignal<string | null>(null);
   const [direction, setDirection] = createSignal<'forward' | 'back' | null>(null);
+  const [addKeyIntent, setAddKeyIntent] = createSignal(false);
   const subscriptionProviders = () => PROVIDERS.filter((p) => p.supportsSubscription);
-  const apiKeyProviders = () => {
-    const filtered = PROVIDERS.filter((p) => !p.subscriptionOnly);
-    return [...filtered].sort((a, b) => (a.localOnly ? 1 : 0) - (b.localOnly ? 1 : 0));
-  };
+  const apiKeyProviders = () => PROVIDERS.filter((p) => !p.subscriptionOnly && !p.localOnly);
+  const localProviders = () => PROVIDERS.filter((p) => p.localOnly);
 
   const getProviderByAuth = (provId: string, authType: AuthType) =>
     props.providers.find((p) => p.provider === provId && p.auth_type === authType);
+
+  const getActiveProviderKeys = (provId: string, authType: AuthType) =>
+    props.providers
+      .filter(
+        (p) => p.provider === provId && p.auth_type === authType && p.is_active && p.has_api_key,
+      )
+      .slice()
+      .sort((a, b) => a.priority - b.priority);
 
   const isConnected = (provId: string): boolean => {
     const p = getProviderByAuth(provId, 'api_key');
@@ -90,6 +124,16 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
     return !!p && p.is_active && !!provDef?.noKeyRequired;
   };
 
+  // Local-tab connection check: Ollama / LM Studio rows carry
+  // `auth_type: 'local'` after the backfill migrations. Ignoring that would
+  // leave the Local tab's toggles permanently off even once the user
+  // connects the provider (its counterpart auth_type='api_key' row no
+  // longer exists).
+  const isLocalConnected = (provId: string): boolean => {
+    const p = getProviderByAuth(provId, 'local');
+    return !!p && p.is_active;
+  };
+
   const resetToList = () => {
     setSelectedProvider(null);
     setShowCustomForm(false);
@@ -103,6 +147,12 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
   };
 
   const goBack = () => {
+    // When opened via deep-link (from a provider list page), there is no
+    // "list view" to go back to. Close the modal instead.
+    if (deepLink) {
+      closeHandler()();
+      return;
+    }
     setDirection('back');
     resetToList();
   };
@@ -114,13 +164,15 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
     resetToList();
   };
 
-  const openDetail = (provId: string, authType: AuthType) => {
+  const openDetail = (provId: string, authType: AuthType, addKey?: boolean) => {
     setDirection('forward');
+    setAddKeyIntent(false);
     setSelectedProvider(provId);
     setSelectedAuthType(authType);
     setKeyInput('');
     setEditing(false);
     setValidationError(null);
+    if (addKey) queueMicrotask(() => setAddKeyIntent(true));
   };
 
   const openCustomForm = (prefill?: CustomProviderPrefill) => {
@@ -147,6 +199,26 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
   const openLocalServer = (prov: ProviderDef) => {
     setDirection('forward');
     setLocalServerProvider(prov);
+  };
+
+  const handleLocalToggle = async (providerKey: string) => {
+    // The Local tab's toggle-off action deactivates the tenant_providers row
+    // without touching the custom_providers row (for LM Studio): the user
+    // can flip it back on via the same tile, and the backend cleans up
+    // dangling tier overrides as part of disconnect.
+    setBusy(true);
+    try {
+      const result = await disconnectProvider(props.agentName, providerKey, 'local');
+      if (result?.notifications?.length) {
+        for (const msg of result.notifications) toast.error(msg);
+      }
+      toast.success('Provider disconnected');
+      props.onUpdate();
+    } catch {
+      // error toast from fetchMutate
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleSubscriptionToggle = async (provId: string) => {
@@ -197,6 +269,10 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
               props.onUpdate();
             }}
             onBack={goBack}
+            onOpenCustomForm={() => {
+              setLocalServerProvider(null);
+              openCustomForm();
+            }}
           />
         </div>
       </Show>
@@ -225,138 +301,8 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
         </div>
       </Show>
 
-      {/* -- List View -- */}
-      <Show
-        when={
-          selectedProvider() === null &&
-          !showCustomForm() &&
-          !editingCustomProvider() &&
-          !localServerProvider()
-        }
-      >
-        <div
-          class="provider-modal__view"
-          classList={{ 'provider-modal__view--from-left': direction() === 'back' }}
-        >
-          <Show when={showHeader()}>
-            <div class="routing-modal__header">
-              <div>
-                <div class="routing-modal__title" id="provider-modal-title">
-                  Connect providers
-                </div>
-                <div class="routing-modal__subtitle">
-                  Use your subscriptions or API keys to enable routing
-                </div>
-              </div>
-              <button class="modal__close" onClick={closeHandler()} aria-label="Close">
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </button>
-            </div>
-          </Show>
-
-          {/* -- Tabs -- */}
-          <div class="provider-modal__tabs-wrapper">
-            <div class="panel__tabs" role="tablist">
-              <button
-                role="tab"
-                aria-selected={activeTab() === 'subscription'}
-                class="panel__tab"
-                classList={{ 'panel__tab--active': activeTab() === 'subscription' }}
-                onClick={() => setActiveTab('subscription')}
-              >
-                <svg
-                  class="provider-modal__tab-icon"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  style="color: #1cc4bf"
-                >
-                  <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
-                  <circle cx="12" cy="7" r="4" />
-                </svg>
-                Subscription
-              </button>
-              <button
-                role="tab"
-                aria-selected={activeTab() === 'api_key'}
-                class="panel__tab"
-                classList={{ 'panel__tab--active': activeTab() === 'api_key' }}
-                onClick={() => setActiveTab('api_key')}
-              >
-                <svg
-                  class="provider-modal__tab-icon"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  style="color: #e59d55"
-                >
-                  <path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
-                </svg>
-                API Keys
-              </button>
-            </div>
-          </div>
-
-          {/* -- Subscription Tab -- */}
-          <Show when={activeTab() === 'subscription'}>
-            <ProviderSubscriptionTab
-              subscriptionProviders={subscriptionProviders()}
-              busy={busy}
-              isSubscriptionConnected={isSubscriptionConnected}
-              isSubscriptionWithToken={isSubscriptionWithToken}
-              onOpenDetail={openDetail}
-              onToggle={handleSubscriptionToggle}
-            />
-          </Show>
-
-          {/* -- API Keys Tab -- */}
-          <Show when={activeTab() === 'api_key'}>
-            <ProviderApiKeyTab
-              apiKeyProviders={apiKeyProviders()}
-              customProviders={props.customProviders ?? []}
-              isConnected={isConnected}
-              isNoKeyConnected={isNoKeyConnected}
-              onOpenDetail={openDetail}
-              onOpenCustomForm={openCustomForm}
-              onEditCustom={openEditCustom}
-              onOpenLocalServer={openLocalServer}
-            />
-          </Show>
-
-          <Show when={showFooter()}>
-            <div class="provider-modal__footer">
-              <button class="btn btn--primary btn--sm" onClick={closeHandler()}>
-                Done
-              </button>
-            </div>
-          </Show>
-        </div>
-      </Show>
+      {/* List view with tabs removed. Connection now happens via deep-link
+           from the Subscriptions / Usage-based / Local pages directly. */}
 
       {/* -- Device Login Detail View (Copilot) -- */}
       <Show
@@ -371,11 +317,13 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
           <CopilotDeviceLogin
             agentName={props.agentName}
             connected={isSubscriptionWithToken(selectedProvider()!)}
+            activeKeys={getActiveProviderKeys(selectedProvider()!, 'subscription')}
             onBack={goBack}
             onConnected={async () => {
               await props.onUpdate();
               goBack();
             }}
+            onUpdated={props.onUpdate}
             onDisconnected={() => {
               goBack();
               props.onUpdate();
@@ -409,7 +357,9 @@ const ProviderSelectContent: Component<ProviderSelectContentProps> = (props) => 
             setValidationError={setValidationError}
             onBack={goBack}
             onUpdate={props.onUpdate}
+            onPollProviders={props.onPollProviders}
             onClose={closeHandler()}
+            initialAddKey={addKeyIntent()}
           />
         </div>
       </Show>

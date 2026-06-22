@@ -16,6 +16,16 @@ describe('ChatGPT Adapter – toResponsesRequest', () => {
     expect(result.instructions).toBe('You are a helpful assistant.');
   });
 
+  it('honors an explicit non-streaming upstream option', () => {
+    const body = {
+      messages: [{ role: 'user', content: 'Hello world' }],
+    };
+
+    const result = toResponsesRequest(body, 'gpt-5', { stream: false });
+
+    expect(result.stream).toBe(false);
+  });
+
   it('extracts system message as instructions', () => {
     const body = {
       messages: [
@@ -97,7 +107,7 @@ describe('ChatGPT Adapter – toResponsesRequest', () => {
     expect(input[0].content[0].type).toBe('output_text');
   });
 
-  it('preserves non-text content part types', () => {
+  it('converts Chat Completions image_url parts to Responses input_image parts', () => {
     const body = {
       messages: [
         {
@@ -110,10 +120,13 @@ describe('ChatGPT Adapter – toResponsesRequest', () => {
       ],
     };
     const result = toResponsesRequest(body, 'gpt-5');
-    const input = result.input as { content: { type: string }[] }[];
+    const input = result.input as { content: Record<string, unknown>[] }[];
 
     expect(input[0].content[0].type).toBe('input_text');
-    expect(input[0].content[1].type).toBe('image_url');
+    expect(input[0].content[1]).toEqual({
+      type: 'input_image',
+      image_url: 'http://example.com/img.png',
+    });
   });
 
   it('filters system and developer messages from input array', () => {
@@ -177,5 +190,37 @@ describe('ChatGPT Adapter – toResponsesRequest', () => {
 
     expect(result.instructions).toBe('You are a helpful assistant.');
     expect(result.input).toEqual([{ role: 'user', content: [{ type: 'input_text', text: 'Hi' }] }]);
+  });
+
+  describe('prompt_cache_key forwarding', () => {
+    const body = {
+      messages: [{ role: 'user', content: 'Hi' }],
+      prompt_cache_key: 'conv-1',
+    };
+
+    it('forwards prompt_cache_key when opted in', () => {
+      const result = toResponsesRequest(body, 'gpt-5', { forwardPromptCacheKey: true });
+
+      expect(result.prompt_cache_key).toBe('conv-1');
+    });
+
+    it('drops prompt_cache_key by default', () => {
+      const result = toResponsesRequest(body, 'gpt-5');
+
+      expect(result).not.toHaveProperty('prompt_cache_key');
+    });
+
+    it.each([[undefined], [''], [42]])(
+      'ignores a %p prompt_cache_key even when opted in',
+      (key) => {
+        const result = toResponsesRequest(
+          { messages: body.messages, prompt_cache_key: key },
+          'gpt-5',
+          { forwardPromptCacheKey: true },
+        );
+
+        expect(result).not.toHaveProperty('prompt_cache_key');
+      },
+    );
   });
 });

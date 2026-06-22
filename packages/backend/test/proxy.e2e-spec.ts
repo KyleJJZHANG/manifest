@@ -1,10 +1,17 @@
 import { INestApplication } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import request from 'supertest';
-import { createTestApp, TEST_OTLP_KEY, TEST_API_KEY, TEST_AGENT_ID } from './helpers';
+import {
+  createTestApp,
+  TEST_OTLP_KEY,
+  TEST_API_KEY,
+  TEST_AGENT_ID,
+  TEST_TENANT_ID,
+} from './helpers';
 import { PricingSyncService } from '../src/database/pricing-sync.service';
 import { ModelPricingCacheService } from '../src/model-prices/model-pricing-cache.service';
-import { TierAutoAssignService } from '../src/routing/routing-core/tier-auto-assign.service';
+import { RoutingCacheService } from '../src/routing/routing-core/routing-cache.service';
+import { ModelDiscoveryService } from '../src/model-discovery/model-discovery.service';
 
 let app: INestApplication;
 
@@ -48,13 +55,31 @@ beforeAll(async () => {
     },
   ]);
   await ds.query(
-    `UPDATE user_providers SET cached_models = $1 WHERE agent_id = $2 AND provider = $3`,
-    [models, TEST_AGENT_ID, 'openai'],
+    `UPDATE tenant_providers SET cached_models = $1 WHERE tenant_id = $2 AND provider = $3`,
+    [models, TEST_TENANT_ID, 'openai'],
   );
 
-  // Recalculate tier assignments with the seeded models
-  const autoAssign = app.get(TierAutoAssignService);
-  await autoAssign.recalculate(TEST_AGENT_ID);
+  // Model routing is user-controlled now (auto-assign was removed). Drop the
+  // discovery cache so the just-seeded cached_models is visible, then pin
+  // gpt-4o-mini on every scoring tier so the proxy always has a route, and
+  // finally flush the routing caches.
+  app.get(ModelDiscoveryService).invalidate(TEST_AGENT_ID);
+  for (const tier of ['simple', 'standard', 'complex', 'reasoning', 'default']) {
+    await ds.query(
+      `INSERT INTO tier_assignments (id, agent_id, tier, override_route, updated_at)
+       VALUES ($1,$2,$3,$4::jsonb, now())
+       ON CONFLICT (agent_id, tier) DO UPDATE SET override_route = EXCLUDED.override_route`,
+      [
+        `tier-${tier}-proxy`,
+        TEST_AGENT_ID,
+        tier,
+        JSON.stringify({ provider: 'openai', authType: 'api_key', model: 'gpt-4o-mini' }),
+      ],
+    );
+  }
+  const routingCache = app.get(RoutingCacheService);
+  routingCache.invalidateAgent(TEST_AGENT_ID);
+  routingCache.invalidateTenant(TEST_TENANT_ID);
 }, 30000);
 
 afterAll(async () => {
@@ -81,6 +106,16 @@ describe('Proxy E2E — /v1/chat/completions', () => {
     expect(res.body.error.message).toContain('Missing the Authorization header');
   });
 
+  it('rejects unauthenticated Responses API requests with HTTP 401', async () => {
+    const res = await api()
+      .post('/v1/responses')
+      .send({ input: 'hello' })
+      .expect(401);
+
+    expect(res.body.error.type).toBe('auth_error');
+    expect(res.body.error.message).toContain('Missing the Authorization header');
+  });
+
   it('returns the friendly envelope when the caller opts into SSE chat semantics', async () => {
     const res = await api()
       .post('/v1/chat/completions')
@@ -93,6 +128,15 @@ describe('Proxy E2E — /v1/chat/completions', () => {
 
   it('returns HTTP 400 when messages are missing', async () => {
     const res = await bearer(api().post('/v1/chat/completions'))
+      .send({})
+      .expect(400);
+
+    expect(res.body.error.type).toBe('invalid_request_error');
+    expect(res.body.error.message).toContain('messages');
+  });
+
+  it('returns HTTP 400 when Responses API input is missing', async () => {
+    const res = await bearer(api().post('/v1/responses'))
       .send({})
       .expect(400);
 
@@ -127,19 +171,64 @@ describe('Proxy E2E — /v1/chat/completions', () => {
         stream: false,
       });
 
-    // The response should NOT be our AgentKeyAuthGuard 401 (which has a specific format).
-    // It will be either a provider error (401/403 from OpenAI) or a network error (500).
-    // Either way, we passed auth and resolved a model successfully.
+    // Whitelist of intentionally-handled status codes. If a status outside this
+    // set surfaces (e.g., a stray 404, 405, 501), the test should fail loudly
+    // instead of silently passing — that signals a real regression in the
+    // proxy pipeline. Forcing the assertion BEFORE the header check also
+    // prevents the original bug where a provider-returned 403 would skip the
+    // header verification entirely and be misread as success.
+    expect([200, 400, 401, 403, 429, 500, 502, 503, 504]).toContain(res.status);
+
+    // The AgentKeyAuthGuard rejects requests BEFORE the proxy resolves a model,
+    // so guard-emitted responses never carry X-Manifest-* headers. If the
+    // status is in the 4xx range that the guard could plausibly emit (401/403),
+    // we must prove that this response came from the provider — i.e., the
+    // proxy successfully passed auth and forwarded — by asserting that the
+    // routing meta headers are present. A guard rejection here would mean the
+    // setup in beforeAll is broken (TEST_OTLP_KEY no longer valid).
+    if (res.status === 401 || res.status === 403) {
+      expect(res.headers['x-manifest-tier']).toBeDefined();
+      expect(res.headers['x-manifest-model']).toBeDefined();
+      expect(res.headers['x-manifest-provider']).toBeDefined();
+      // Body shape from handleProviderError() — upstream_error envelope with
+      // the forwarded status echoed in `error.status`. A guard 401 would have
+      // type='auth_error' so this also discriminates the two paths.
+      expect(res.body?.error?.type).toBe('upstream_error');
+      expect(res.body?.error?.status).toBe(res.status);
+    } else if (res.status >= 500) {
+      // Two failure modes converge here:
+      //  - handleProviderError (provider returned 5xx)  → type: 'upstream_error', X-Manifest-* present
+      //  - handleProxyError    (network/throw in proxy) → type: 'server_error',   no X-Manifest-* headers
+      // Whichever path fires, the envelope must be one of the two known shapes —
+      // a 5xx with no `error` object would indicate a regression.
+      expect(['upstream_error', 'server_error']).toContain(res.body?.error?.type);
+    } else if (res.status === 200) {
+      // Unlikely in CI (the fake key would be rejected), but if it succeeds
+      // we still expect the routing meta headers on the response.
+      expect(res.headers['x-manifest-tier']).toBeDefined();
+      expect(res.headers['x-manifest-model']).toBeDefined();
+    }
+  });
+
+  it('does not return guard 401 envelope when a valid agent key is supplied', async () => {
+    // Regression guard: if the AgentKeyAuthGuard ever rejects TEST_OTLP_KEY,
+    // the entire suite above silently degrades into "always 401, no headers"
+    // territory. Pin the contract explicitly so that a broken seed/key setup
+    // fails this single test instead of corrupting the meaning of every other
+    // assertion in the file.
+    const res = await bearer(api().post('/v1/chat/completions'))
+      .send({
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
     if (res.status === 401) {
-      // If 401, verify it's from the provider (not our guard)
-      // Our guard returns { message: '...', statusCode: 401 }
-      // Provider errors are forwarded with X-Manifest-* headers
-      const hasManifestHeaders =
-        res.headers['x-manifest-tier'] || res.headers['x-manifest-model'];
-      expect(hasManifestHeaders).toBeTruthy();
-    } else {
-      // Network error or other — proxy attempted the forward
-      expect(res.status).toBeDefined();
+      // Guard 401s pass through ProxyExceptionFilter and are wrapped with
+      // type: 'auth_error', code: 'manifest_auth'. Provider 401s come from
+      // handleProviderError() with type: 'upstream_error'. Asserting type
+      // discriminates the two, even before headers are checked.
+      expect(res.body?.error?.type).not.toBe('auth_error');
+      expect(res.body?.error?.code).not.toBe('manifest_auth');
     }
   });
 

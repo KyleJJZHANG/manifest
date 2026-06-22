@@ -9,7 +9,10 @@ function testCacheKey(token: string): string {
 }
 
 function makeContext(headers: Record<string, string | undefined>, ip = '203.0.113.1') {
-  const request: Record<string, unknown> = { headers, ip };
+  // The guard reads request.socket.remoteAddress for its loopback decision
+  // (request.ip is spoofable via X-Forwarded-For when trust proxy is set).
+  // Mirror the test's `ip` onto the socket so existing scenarios still hold.
+  const request: Record<string, unknown> = { headers, ip, socket: { remoteAddress: ip } };
   return {
     req: request,
     ctx: {
@@ -41,10 +44,16 @@ describe('AgentKeyAuthGuard', () => {
   function buildMockRepo() {
     mockGetMany = jest.fn().mockResolvedValue([]);
     const mockSelectQb = {
+      select: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
       leftJoinAndSelect: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
+      getCount: jest.fn().mockResolvedValue(0),
       getMany: mockGetMany,
+      // resolveDevContext seeds-tenant lookup; default to no row so it falls
+      // back to repo.findOne — preserves existing test scenarios.
+      getOne: jest.fn().mockResolvedValue(null),
     };
     mockExecute = jest.fn().mockResolvedValue({});
     const mockUpdateQb = {
@@ -84,6 +93,41 @@ describe('AgentKeyAuthGuard', () => {
 
   afterEach(() => {
     guard.onModuleDestroy();
+  });
+
+  describe('onModuleInit legacy-hash audit', () => {
+    const makeAuditRepo = (getCount: jest.Mock) =>
+      ({
+        createQueryBuilder: jest.fn(() => ({
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          getCount,
+        })),
+      }) as never;
+
+    it('warns when legacy static-salt keys are still active', async () => {
+      const g = new AgentKeyAuthGuard(
+        makeAuditRepo(jest.fn().mockResolvedValue(3)),
+        createMockConfig(),
+      );
+      const logger = (g as unknown as { logger: { warn: jest.Mock } }).logger;
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      await g.onModuleInit();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('legacy static-salt'));
+      g.onModuleDestroy();
+    });
+
+    it('swallows audit query failures with a debug log', async () => {
+      const g = new AgentKeyAuthGuard(
+        makeAuditRepo(jest.fn().mockRejectedValue(new Error('no table'))),
+        createMockConfig(),
+      );
+      const logger = (g as unknown as { logger: { debug: jest.Mock } }).logger;
+      const debugSpy = jest.spyOn(logger, 'debug').mockImplementation(() => undefined);
+      await g.onModuleInit();
+      expect(debugSpy).toHaveBeenCalled();
+      g.onModuleDestroy();
+    });
   });
 
   it('throws UnauthorizedException when Authorization header is missing', async () => {
@@ -136,7 +180,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
@@ -162,7 +206,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent-2' },
-        tenant: { name: 'user-2' },
+        tenant: { owner_user_id: 'user-2' },
       },
     ]);
 
@@ -189,7 +233,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: pastDate,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
@@ -208,7 +252,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
@@ -227,6 +271,83 @@ describe('AgentKeyAuthGuard', () => {
     expect(mockCreateQueryBuilder).not.toHaveBeenCalled();
   });
 
+  it('stops authenticating from cache once the key own expiry passes within the cache TTL', async () => {
+    // A key that expires (or is set to expire) while still cached must not keep
+    // authenticating until the 5-min cache TTL lapses. The fast path reads the
+    // key's own expires_at, not just the cache entry's TTL.
+    const token = 'mnfst_soon-expiring-key';
+    const keyHash = hashKey(token);
+    mockGetMany.mockResolvedValue([
+      {
+        id: 'key-exp',
+        tenant_id: 'tenant-1',
+        agent_id: 'agent-1',
+        key_hash: keyHash,
+        expires_at: null,
+        agent: { name: 'test-agent' },
+        tenant: { owner_user_id: 'user-1' },
+      },
+    ]);
+
+    // First call caches the key (DB lookup happens).
+    const { ctx: ctx1 } = makeContext({ authorization: `Bearer ${token}` });
+    expect(await guard.canActivate(ctx1)).toBe(true);
+    expect(mockGetMany).toHaveBeenCalledTimes(1);
+
+    // Simulate the key being set to expire in the past while still cached: its
+    // cache entry TTL is well in the future, but keyExpiresAt is now stale.
+    const internalCache = (guard as unknown as { cache: Map<string, { keyExpiresAt: number }> })
+      .cache;
+    const entry = internalCache.get(testCacheKey(token))!;
+    expect(entry).toBeDefined();
+    entry.keyExpiresAt = Date.now() - 1000;
+
+    // The DB now reports the key as expired — the fast path must drop the stale
+    // entry and fall through to the DB re-check, which rejects.
+    mockGetMany.mockResolvedValue([
+      {
+        id: 'key-exp',
+        tenant_id: 'tenant-1',
+        agent_id: 'agent-1',
+        key_hash: keyHash,
+        expires_at: new Date(Date.now() - 1000).toISOString(),
+        agent: { name: 'test-agent' },
+        tenant: { owner_user_id: 'user-1' },
+      },
+    ]);
+
+    const { ctx: ctx2 } = makeContext({ authorization: `Bearer ${token}` });
+    await expect(guard.canActivate(ctx2)).rejects.toThrow('API key expired');
+    // The cache entry was discarded rather than honored, so a DB re-check ran.
+    expect(internalCache.has(testCacheKey(token))).toBe(false);
+  });
+
+  it('stores the key own expires_at on the cached entry for non-expiring keys', async () => {
+    const token = 'mnfst_no-expiry-key';
+    mockGetMany.mockResolvedValue([
+      {
+        id: 'key-noexp',
+        tenant_id: 'tenant-1',
+        agent_id: 'agent-1',
+        key_hash: hashKey(token),
+        expires_at: null,
+        agent: { name: 'test-agent' },
+        tenant: { owner_user_id: 'user-1' },
+      },
+    ]);
+
+    const { ctx } = makeContext({ authorization: `Bearer ${token}` });
+    await guard.canActivate(ctx);
+
+    const internalCache = (
+      guard as unknown as { cache: Map<string, { keyExpiresAt: number | null }> }
+    ).cache;
+    const entry = internalCache.get(testCacheKey(token));
+    expect(entry).toBeDefined();
+    // A null DB expiry stays null on the cache entry (key never expires).
+    expect(entry!.keyExpiresAt).toBeNull();
+  });
+
   it('requires auth for loopback IPs in non-development mode', async () => {
     const { ctx } = makeContext({}, '127.0.0.1');
     await expect(guard.canActivate(ctx)).rejects.toThrow(UnauthorizedException);
@@ -243,7 +364,7 @@ describe('AgentKeyAuthGuard', () => {
         tenant_id: 'dev-tenant',
         agent_id: 'dev-agent',
         agent: { name: 'demo-agent' },
-        tenant: { name: 'dev-user' },
+        tenant: { owner_user_id: 'dev-user' },
       });
       const { ctx, req } = makeContext({ authorization: 'Bearer dev-no-auth' }, '127.0.0.1');
       const result = await guard.canActivate(ctx);
@@ -266,7 +387,7 @@ describe('AgentKeyAuthGuard', () => {
         tenant_id: 'dev-tenant',
         agent_id: 'dev-agent',
         agent: { name: 'demo-agent' },
-        tenant: { name: 'dev-user' },
+        tenant: { owner_user_id: 'dev-user' },
       });
       const { ctx, req } = makeContext({}, '127.0.0.1');
       const result = await guard.canActivate(ctx);
@@ -316,7 +437,7 @@ describe('AgentKeyAuthGuard', () => {
         tenant_id: 'dev-tenant',
         agent_id: 'dev-agent',
         agent: { name: 'demo-agent' },
-        tenant: { name: 'dev-user' },
+        tenant: { owner_user_id: 'dev-user' },
       });
 
       const { ctx: ctx1 } = makeContext({ authorization: 'Bearer dev-no-auth' }, '127.0.0.1');
@@ -331,7 +452,7 @@ describe('AgentKeyAuthGuard', () => {
   });
 
   it('handles request.ip being undefined without crashing', async () => {
-    const request: Record<string, unknown> = { headers: {}, ip: undefined };
+    const request: Record<string, unknown> = { headers: {}, ip: undefined, socket: {} };
     const ctx = {
       switchToHttp: () => ({
         getRequest: () => request,
@@ -350,7 +471,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
     mockExecute.mockRejectedValueOnce(new Error('DB write error'));
@@ -387,7 +508,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent-max' },
-        tenant: { name: 'user-max' },
+        tenant: { owner_user_id: 'user-max' },
       },
     ]);
 
@@ -430,7 +551,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(evictToken),
         expires_at: null,
         agent: { name: 'test-agent-evict' },
-        tenant: { name: 'user-evict' },
+        tenant: { owner_user_id: 'user-evict' },
       },
     ]);
 
@@ -498,7 +619,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: hashKey(token),
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
@@ -508,6 +629,66 @@ describe('AgentKeyAuthGuard', () => {
     const internalCache = (guard as any).cache as Map<string, unknown>;
     expect(internalCache.has(token)).toBe(false);
     expect(internalCache.has(testCacheKey(token))).toBe(true);
+  });
+
+  it('caches entries for the configured 5 minute TTL', async () => {
+    const token = 'mnfst_ttl-check-key';
+    mockGetMany.mockResolvedValue([
+      {
+        id: 'key-ttl',
+        tenant_id: 'tenant-1',
+        agent_id: 'agent-1',
+        key_hash: hashKey(token),
+        expires_at: null,
+        agent: { name: 'test-agent' },
+        tenant: { owner_user_id: 'user-1' },
+      },
+    ]);
+
+    const before = Date.now();
+    const { ctx } = makeContext({ authorization: `Bearer ${token}` });
+    await guard.canActivate(ctx);
+
+    const internalCache = (guard as any).cache as Map<string, { expiresAt: number }>;
+    const entry = internalCache.get(testCacheKey(token));
+    expect(entry).toBeDefined();
+    const ttlMs = entry!.expiresAt - before;
+    expect(ttlMs).toBeGreaterThanOrEqual(5 * 60 * 1000 - 1000);
+    expect(ttlMs).toBeLessThanOrEqual(5 * 60 * 1000 + 1000);
+  });
+
+  it('LRU touch on cache hit moves entry to tail of insertion order', async () => {
+    const token = 'mnfst_lru-touch-key';
+    mockGetMany.mockResolvedValue([
+      {
+        id: 'key-lru',
+        tenant_id: 'tenant-1',
+        agent_id: 'agent-1',
+        key_hash: hashKey(token),
+        expires_at: null,
+        agent: { name: 'test-agent' },
+        tenant: { owner_user_id: 'user-1' },
+      },
+    ]);
+
+    const { ctx } = makeContext({ authorization: `Bearer ${token}` });
+    await guard.canActivate(ctx);
+
+    const internalCache = (guard as any).cache as Map<string, unknown>;
+    internalCache.set(testCacheKey('mnfst_other-1'), {
+      tenantId: 't',
+      agentId: 'a',
+      agentName: 'n',
+      userId: 'u',
+      expiresAt: Date.now() + 999_999,
+    });
+
+    expect(Array.from(internalCache.keys())[0]).toBe(testCacheKey(token));
+
+    const { ctx: ctx2 } = makeContext({ authorization: `Bearer ${token}` });
+    await guard.canActivate(ctx2);
+
+    expect(Array.from(internalCache.keys())[1]).toBe(testCacheKey(token));
   });
 
   it('invalidateCache removes a specific key from cache', async () => {
@@ -521,7 +702,7 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: storedHash,
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
@@ -540,11 +721,13 @@ describe('AgentKeyAuthGuard', () => {
         key_hash: storedHash,
         expires_at: null,
         agent: { name: 'test-agent' },
-        tenant: { name: 'user-1' },
+        tenant: { owner_user_id: 'user-1' },
       },
     ]);
 
     const mockSelectQb2 = {
+      select: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
       leftJoinAndSelect: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),

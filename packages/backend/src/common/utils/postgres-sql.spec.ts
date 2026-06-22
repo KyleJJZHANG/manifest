@@ -8,6 +8,8 @@ import {
   sqlSanitizeCost,
   timestampDefault,
   timestampType,
+  toSqlTimestamp,
+  toLocalSqlTimestamp,
 } from './postgres-sql';
 
 describe('postgres-sql', () => {
@@ -93,6 +95,53 @@ describe('postgres-sql', () => {
 
     it('sqlCastInterval wraps a named parameter in CAST(... AS interval)', () => {
       expect(sqlCastInterval('since')).toBe('CAST(:since AS interval)');
+    });
+  });
+
+  describe('toSqlTimestamp', () => {
+    it('formats a Date as a space-separated string without T or Z (19 chars)', () => {
+      const out = toSqlTimestamp(new Date('2026-04-20T12:34:56.789Z'));
+      expect(out).toBe('2026-04-20 12:34:56');
+      expect(out).not.toContain('T');
+      expect(out).not.toContain('Z');
+      expect(out).toHaveLength(19);
+    });
+
+    it('defaults to the current time when no Date is given', () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-01-02T03:04:05.000Z').getTime());
+      expect(toSqlTimestamp()).toBe('2026-01-02 03:04:05');
+      jest.useRealTimers();
+    });
+  });
+
+  describe('toLocalSqlTimestamp', () => {
+    it('formats a Date in local time as a space-separated string (no T or Z)', () => {
+      const d = new Date('2026-04-20T12:34:56.789Z');
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const expected =
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      const out = toLocalSqlTimestamp(d);
+      expect(out).toBe(expected);
+      expect(out).not.toContain('T');
+      expect(out).not.toContain('Z');
+      expect(out).toHaveLength(19);
+    });
+
+    it('round-trips to the same instant when parsed as local time', () => {
+      // Unlike toSqlTimestamp (UTC), the local string read back as local time
+      // recovers the original instant — this is the property period boundaries
+      // rely on to line up with locally-stored agent_messages.timestamp rows.
+      const d = new Date('2026-04-20T12:34:56.000Z');
+      expect(new Date(toLocalSqlTimestamp(d).replace(' ', 'T')).getTime()).toBe(d.getTime());
+    });
+
+    it('defaults to the current time when no Date is given', () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-01-02T03:04:05.000Z').getTime());
+      expect(toLocalSqlTimestamp()).toBe(toLocalSqlTimestamp(new Date()));
+      jest.useRealTimers();
     });
   });
 });

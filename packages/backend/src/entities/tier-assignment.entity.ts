@@ -1,4 +1,5 @@
 import { Entity, Column, PrimaryColumn, Index } from 'typeorm';
+import type { ModelRoute, ResponseMode, OutputModality } from 'manifest-shared';
 import { timestampType, timestampDefault } from '../common/utils/postgres-sql';
 
 @Entity('tier_assignments')
@@ -8,28 +9,25 @@ export class TierAssignment {
   id!: string;
 
   @Column('varchar')
-  user_id!: string;
-
-  @Column('varchar')
   agent_id!: string;
 
   @Column('varchar')
   tier!: string;
 
-  @Column('varchar', { nullable: true })
-  override_model!: string | null;
+  @Column('jsonb', { nullable: true })
+  override_route!: ModelRoute | null;
 
-  @Column('varchar', { nullable: true })
-  override_provider!: string | null;
+  @Column('jsonb', { nullable: true })
+  auto_assigned_route!: ModelRoute | null;
 
-  @Column('varchar', { nullable: true })
-  override_auth_type!: 'api_key' | 'subscription' | null;
+  @Column('jsonb', { nullable: true })
+  fallback_routes!: ModelRoute[] | null;
 
-  @Column('varchar', { nullable: true })
-  auto_assigned_model!: string | null;
+  @Column('varchar', { default: 'text' })
+  output_modality!: OutputModality;
 
-  @Column('simple-json', { nullable: true })
-  fallback_models!: string[] | null;
+  @Column('varchar', { default: 'buffered' })
+  response_mode!: ResponseMode;
 
   @Column(timestampType(), { default: timestampDefault() })
   updated_at!: string;

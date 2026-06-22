@@ -5,11 +5,13 @@ import {
   createMemo,
   createResource,
   createSignal,
-  onMount,
+  on,
   Show,
   type Component,
 } from 'solid-js';
-import ChartCard from '../components/ChartCard.jsx';
+import ProviderChartCard from '../components/ProviderChartCard.jsx';
+import FilterSelect from '../components/FilterSelect.jsx';
+import { AGENT_COLORS } from '../components/MultiAgentTokenChart.jsx';
 import CostByModelTable from '../components/CostByModelTable.jsx';
 import ErrorState from '../components/ErrorState.jsx';
 import FeedbackModal from '../components/FeedbackModal.jsx';
@@ -17,25 +19,28 @@ import MessageTable from '../components/MessageTable.jsx';
 import OverviewSkeleton from '../components/OverviewSkeleton.jsx';
 import Select from '../components/Select.jsx';
 import SetupModal from '../components/SetupModal.jsx';
-import { COMPACT_COLUMNS, type MessageRow } from '../components/message-table-types.js';
+import { type MessageRow } from '../components/message-table-types.js';
 import { agentDisplayName } from '../services/agent-display-name.js';
+import { agentPlatform, agentCategory } from '../services/agent-platform-store.js';
+import { PROVIDERS } from '../services/providers.js';
+import { getOverview, setMessageFeedback, clearMessageFeedback } from '../services/api.js';
 import {
-  agentPlatform,
-  agentCategory,
-  agentPlatformIcon,
-} from '../services/agent-platform-store.js';
-import {
-  getCustomProviders,
-  getOverview,
-  setMessageFeedback,
-  clearMessageFeedback,
-  type CustomProviderData,
-} from '../services/api.js';
+  getPerProviderTimeseries,
+  getPerProviderMessageTimeseries,
+  getPerProviderCostTimeseries,
+} from '../services/api/analytics.js';
 import { preloadModelDisplayNames } from '../services/model-display.js';
-import { isRecentlyCreated } from '../services/recent-agents.js';
-import { checkIsSelfHosted } from '../services/setup-status.js';
-import { pingCount } from '../services/sse.js';
+import { isRecentlyCreated, isSetupPending, clearSetupPending } from '../services/recent-agents.js';
+import { messagePing } from '../services/sse.js';
+import {
+  RANGE_STORAGE_KEY,
+  VALID_RANGES,
+  useOverviewColumns,
+  useOverviewRange,
+} from '../services/use-overview-range.js';
 import '../styles/overview.css';
+import '../styles/charts.css';
+import '../styles/routing.css';
 
 interface OverviewData {
   summary: {
@@ -63,6 +68,7 @@ interface OverviewData {
     share_pct: number;
     estimated_cost: number;
     auth_type: string | null;
+    provider?: string | null;
   }>;
   recent_activity: MessageRow[];
   active_skills: Array<{
@@ -76,49 +82,49 @@ interface OverviewData {
   has_providers?: boolean;
 }
 
+type PivotedTimeseries = {
+  agents: string[];
+  timeseries: Array<Record<string, number | string>>;
+};
+
+type ProviderView = 'cost' | 'tokens' | 'messages';
+type TimeseriesKey = { range: string; agent: string; _ping: number };
+
 const Overview: Component = () => {
   const params = useParams<{ agentName: string }>();
   const location = useLocation<{ newApiKey?: string }>();
   const navigate = useNavigate();
   preloadModelDisplayNames();
-  const [isSelfHosted, setIsSelfHosted] = createSignal(false);
-  onMount(() => {
-    checkIsSelfHosted().then(setIsSelfHosted);
-  });
-  const columns = () =>
-    isSelfHosted() ? COMPACT_COLUMNS.filter((c) => c !== 'feedback') : COMPACT_COLUMNS;
-  const RANGE_STORAGE_KEY = 'manifest_chart_range';
-  const VALID_RANGES = new Set(['24h', '7d', '30d']);
-  const savedRange = localStorage.getItem(RANGE_STORAGE_KEY);
-  const [range, setRange] = createSignal(
-    savedRange && VALID_RANGES.has(savedRange) ? savedRange : '30d',
+  const { isSelfHosted, columns } = useOverviewColumns();
+  // Only treat the stored value as a user selection when it is actually valid.
+  // An invalid stored range falls through to the smart-range cascade.
+  const [userSelectedRange, setUserSelectedRange] = createSignal(
+    VALID_RANGES.has(localStorage.getItem(RANGE_STORAGE_KEY) ?? ''),
   );
-  const [userSelectedRange, setUserSelectedRange] = createSignal(!!savedRange);
-
-  const handleRangeChange = (value: string) => {
-    setRange(value);
-    setUserSelectedRange(true);
-    localStorage.setItem(RANGE_STORAGE_KEY, value);
+  const { range, setRange, handleRangeChange } = useOverviewRange({
+    markUserSelected: () => setUserSelectedRange(true),
+  });
+  const [activeView, setActiveViewRaw] = createSignal<ProviderView>('messages');
+  const [tokenChartRequested, setTokenChartRequested] = createSignal(false);
+  const [costChartRequested, setCostChartRequested] = createSignal(false);
+  const setActiveView = (view: ProviderView) => {
+    if (view === 'tokens') setTokenChartRequested(true);
+    if (view === 'cost') setCostChartRequested(true);
+    setActiveViewRaw(view);
   };
-  const [activeView, setActiveView] = createSignal<'cost' | 'tokens' | 'messages'>('messages');
+  // Open gate keys off a persistent "setup pending" flag (localStorage) so the
+  // modal reliably reopens after a page refresh until the user dismisses or
+  // completes it; `isRecentlyCreated` is an in-session OR that need not survive
+  // reloads. The completed/dismissed flags are the backstop against re-opening.
   const [setupOpen, setSetupOpen] = createSignal(
-    isRecentlyCreated(decodeURIComponent(params.agentName)),
+    (isSetupPending(decodeURIComponent(params.agentName)) ||
+      isRecentlyCreated(decodeURIComponent(params.agentName))) &&
+      !localStorage.getItem(`setup_completed_${params.agentName}`) &&
+      !localStorage.getItem(`setup_dismissed_${params.agentName}`),
   );
   const [setupCompleted, setSetupCompleted] = createSignal(
     !!localStorage.getItem(`setup_completed_${params.agentName}`),
   );
-  const [customProviders] = createResource(
-    () => params.agentName,
-    (name) => getCustomProviders(decodeURIComponent(name)),
-  );
-
-  const customProviderName = (model: string): string | undefined => {
-    const match = model.match(/^custom:([^/]+)\//);
-    if (!match) return undefined;
-    const id = match[1];
-    return customProviders()?.find((cp: CustomProviderData) => cp.id === id)?.name;
-  };
-
   const [feedbackModalOpen, setFeedbackModalOpen] = createSignal(false);
   const [feedbackMessageId, setFeedbackMessageId] = createSignal('');
   const [feedbackOverrides, setFeedbackOverrides] = createSignal<Record<string, string | null>>({});
@@ -174,7 +180,7 @@ const Overview: Component = () => {
   };
 
   const [data, { refetch }] = createResource(
-    () => ({ range: range(), agentName: params.agentName, _ping: pingCount() }),
+    () => ({ range: range(), agentName: params.agentName, _ping: messagePing() }),
     (p) => getOverview(p.range, p.agentName) as Promise<OverviewData>,
   );
 
@@ -200,27 +206,122 @@ const Overview: Component = () => {
 
   const SMART_RANGES: string[] = ['30d', '7d', '24h'];
 
-  createEffect(() => {
-    if (userSelectedRange()) return;
-    const d = data();
-    if (!d || (d.has_data === false && !d.has_providers)) return;
-    const hasData =
-      (d.token_usage?.length ?? 0) > 0 ||
-      (d.cost_usage?.length ?? 0) > 0 ||
-      (d.message_usage?.length ?? 0) > 0;
-    if (hasData) return;
-    const currentIdx = SMART_RANGES.indexOf(range());
-    if (currentIdx < 0 || currentIdx >= SMART_RANGES.length - 1) return;
-    setRange(SMART_RANGES[currentIdx + 1]!);
+  // Step the chart range down to the next bucket while it has no data, but only
+  // after a fetch resolves — `defer: true` skips the no-op run at mount where
+  // `data()` is still undefined. Both `data` and `range` are tracked so the
+  // cascade keeps re-firing as it steps 30d → 7d → 24h.
+  createEffect(
+    on(
+      [data, range],
+      ([d, currentRange]) => {
+        if (userSelectedRange()) return;
+        if (!d || (d.has_data === false && !d.has_providers)) return;
+        const hasData =
+          (d.token_usage?.length ?? 0) > 0 ||
+          (d.cost_usage?.length ?? 0) > 0 ||
+          (d.message_usage?.length ?? 0) > 0;
+        if (hasData) return;
+        const currentIdx = SMART_RANGES.indexOf(currentRange);
+        if (currentIdx < 0 || currentIdx >= SMART_RANGES.length - 1) return;
+        setRange(SMART_RANGES[currentIdx + 1]!);
+      },
+      { defer: true },
+    ),
+  );
+
+  // ── Provider breakdown (per-agent, grouped by provider) ─────────────
+  const providerFilterKey = () => `agent-overview-providers:${params.agentName}`;
+  const loadSavedProviders = (): Set<string> => {
+    try {
+      const saved = sessionStorage.getItem(providerFilterKey());
+      if (saved) return new Set(JSON.parse(saved) as string[]);
+    } catch {
+      /* ignore */
+    }
+    return new Set();
+  };
+  const [selectedProviders, setSelectedProviders] = createSignal<Set<string>>(loadSavedProviders());
+
+  const tsKey = (): TimeseriesKey => ({
+    range: range(),
+    agent: params.agentName,
+    _ping: messagePing(),
+  });
+  const [providerTokenTs] = createResource(
+    () => (tokenChartRequested() ? tsKey() : false),
+    (p) => getPerProviderTimeseries(p.agent, p.range) as Promise<PivotedTimeseries>,
+  );
+  const [providerMessageTs] = createResource(
+    tsKey,
+    (p) => getPerProviderMessageTimeseries(p.agent, p.range) as Promise<PivotedTimeseries>,
+  );
+  const [providerCostTs] = createResource(
+    () => (costChartRequested() ? tsKey() : false),
+    (p) => getPerProviderCostTimeseries(p.agent, p.range) as Promise<PivotedTimeseries>,
+  );
+
+  const allProviders = createMemo(() => {
+    const set = new Set<string>([
+      ...(providerTokenTs()?.agents ?? []),
+      ...(providerMessageTs()?.agents ?? []),
+      ...(providerCostTs()?.agents ?? []),
+    ]);
+    return [...set].sort();
   });
 
-  const messageChartData = createMemo(() => {
-    const src = data()?.message_usage;
-    return src?.map((d) => ({ time: d.hour ?? d.date ?? '', value: d.count })) ?? [];
+  const providerColorMap = createMemo(() => {
+    const map: Record<string, string> = {};
+    const list = allProviders();
+    for (let i = 0; i < list.length; i++) map[list[i]!] = AGENT_COLORS[i % AGENT_COLORS.length]!;
+    return map;
   });
+
+  const effectiveSelected = () => {
+    const sel = selectedProviders();
+    if (sel.size === 0 && allProviders().length > 0) return new Set(allProviders());
+    return sel;
+  };
+  const persistProviders = (next: Set<string>) => {
+    setSelectedProviders(next);
+    try {
+      sessionStorage.setItem(providerFilterKey(), JSON.stringify([...next]));
+    } catch {
+      /* ignore */
+    }
+  };
+  const toggleProvider = (provider: string) => {
+    const next = new Set(effectiveSelected());
+    if (next.has(provider)) next.delete(provider);
+    else next.add(provider);
+    persistProviders(next);
+  };
+  const setAllProviders = (on: boolean) =>
+    persistProviders(on ? new Set(allProviders()) : new Set<string>());
+
+  const filterTs = (raw: PivotedTimeseries | undefined): PivotedTimeseries | undefined => {
+    if (!raw) return undefined;
+    const sel = effectiveSelected();
+    if (sel.size === 0) return raw;
+    return {
+      agents: raw.agents.filter((a) => sel.has(a)),
+      timeseries: raw.timeseries.map((row) => {
+        const out: Record<string, number | string> = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (k === 'hour' || k === 'date' || sel.has(k)) out[k] = v;
+        }
+        return out;
+      }),
+    };
+  };
+  const filteredTokenTs = createMemo(() => filterTs(providerTokenTs()));
+  const filteredMessageTs = createMemo(() => filterTs(providerMessageTs()));
+  const filteredCostTs = createMemo(() => filterTs(providerCostTs()));
+
+  const providerDisplayName = (provId: string): string =>
+    PROVIDERS.find((p) => p.id === provId)?.name ?? provId;
 
   return (
-    <div class="container--md">
+    <div class="container--lg">
       <Title>
         {agentDisplayName() ?? decodeURIComponent(params.agentName)} Overview - Manifest
       </Title>
@@ -228,24 +329,23 @@ const Overview: Component = () => {
         name="description"
         content={`Monitor ${agentDisplayName() ?? decodeURIComponent(params.agentName)} performance — costs, tokens, and activity.`}
       />
-      <div class="page-header">
-        <div>
-          <h1 style="display: flex; align-items: center; gap: 10px;">
-            <Show when={agentPlatformIcon()}>
-              <img
-                src={agentPlatformIcon()}
-                alt=""
-                width="28"
-                height="28"
-                class="overview__platform-icon"
-                style="border-radius: 4px;"
-              />
-            </Show>
-            {agentDisplayName() ?? decodeURIComponent(params.agentName)} Overview
-          </h1>
-          <span class="breadcrumb">Real-time summary of spending, tokens, and messages</span>
-        </div>
+      <div
+        class="page-header"
+        style="justify-content: flex-end; border-bottom: none; padding-bottom: 0;"
+      >
         <div class="header-controls">
+          <Show when={showDashboard() && allProviders().length > 1}>
+            <FilterSelect
+              noun="providers"
+              items={allProviders()}
+              selected={effectiveSelected()}
+              colorMap={providerColorMap()}
+              displayName={providerDisplayName}
+              onToggle={toggleProvider}
+              onSelectAll={() => setAllProviders(true)}
+              onUnselectAll={() => setAllProviders(false)}
+            />
+          </Show>
           <Show when={showDashboard()}>
             <Select
               value={range()}
@@ -259,7 +359,7 @@ const Overview: Component = () => {
           </Show>
           <Show when={showEmptyState() && !setupCompleted()}>
             <button class="btn btn--primary btn--sm" onClick={() => setSetupOpen(true)}>
-              Set up agent
+              Set up harness
             </button>
           </Show>
         </div>
@@ -273,13 +373,13 @@ const Overview: Component = () => {
               fallback={
                 <div class="empty-state">
                   <div class="empty-state__title">No activity yet</div>
-                  <p>Set up your agent and send a message. Usage data shows up here.</p>
+                  <p>Set up your harness and send a message. Usage data shows up here.</p>
                   <button
                     class="btn btn--primary btn--sm"
                     style="margin-top: var(--gap-md);"
                     onClick={() => setSetupOpen(true)}
                   >
-                    Set up agent
+                    Set up harness
                   </button>
                   <div class="empty-state__img-wrapper">
                     <img
@@ -299,12 +399,12 @@ const Overview: Component = () => {
                   class="btn btn--primary btn--sm"
                   style="margin-top: var(--gap-md);"
                   onClick={() =>
-                    navigate(`/agents/${encodeURIComponent(params.agentName)}/routing`, {
+                    navigate(`/harnesses/${encodeURIComponent(params.agentName)}/routing`, {
                       state: { openProviders: true },
                     })
                   }
                 >
-                  Enable routing
+                  Connect provider
                 </button>
                 <div class="empty-state__img-wrapper">
                   <img
@@ -330,7 +430,7 @@ const Overview: Component = () => {
                       </p>
                     </div>
                   </Show>
-                  <ChartCard
+                  <ProviderChartCard
                     activeView={activeView()}
                     onViewChange={setActiveView}
                     costValue={d().summary?.cost_today?.value ?? 0}
@@ -339,10 +439,12 @@ const Overview: Component = () => {
                     tokensTrendPct={d().summary?.tokens_today?.trend_pct ?? 0}
                     messagesValue={d().summary?.messages?.value ?? 0}
                     messagesTrendPct={d().summary?.messages?.trend_pct ?? 0}
-                    costUsage={d().cost_usage}
-                    tokenUsage={d().token_usage}
-                    messageChartData={messageChartData()}
+                    costInfoTooltip="Actual API key costs only. Subscription usage is not included."
                     range={range()}
+                    agentTimeseries={filteredTokenTs() ?? undefined}
+                    agentMessageTimeseries={filteredMessageTs() ?? undefined}
+                    agentCostTimeseries={filteredCostTs() ?? undefined}
+                    colorMap={providerColorMap()}
                   />
 
                   {/* Recent Messages */}
@@ -352,7 +454,7 @@ const Overview: Component = () => {
                       style="display: flex; justify-content: space-between; align-items: center;"
                     >
                       Recent Messages
-                      <A href={`/agents/${params.agentName}/messages`} class="view-more-link">
+                      <A href={`/harnesses/${params.agentName}/messages`} class="view-more-link">
                         View more
                       </A>
                     </div>
@@ -364,17 +466,14 @@ const Overview: Component = () => {
                       }
                       columns={columns()}
                       agentName={params.agentName}
-                      customProviderName={customProviderName}
+                      customProviderName={() => undefined}
                       onFeedbackLike={isSelfHosted() ? undefined : handleFeedbackLike}
                       onFeedbackDislike={isSelfHosted() ? undefined : handleFeedbackDislike}
                       onFeedbackClear={isSelfHosted() ? undefined : handleFeedbackClear}
                     />
                   </div>
 
-                  <CostByModelTable
-                    rows={d().cost_by_model ?? []}
-                    customProviderName={customProviderName}
-                  />
+                  <CostByModelTable rows={d().cost_by_model ?? []} />
                 </>
               );
             }}
@@ -390,14 +489,16 @@ const Overview: Component = () => {
         agentCategory={agentCategory()}
         onClose={() => {
           localStorage.setItem(`setup_dismissed_${params.agentName}`, '1');
+          clearSetupPending(decodeURIComponent(params.agentName));
           setSetupOpen(false);
         }}
         onDone={() => {
           localStorage.setItem(`setup_completed_${params.agentName}`, '1');
+          clearSetupPending(decodeURIComponent(params.agentName));
           setSetupCompleted(true);
         }}
         onGoToRouting={() => {
-          navigate(`/agents/${encodeURIComponent(params.agentName)}/routing`, {
+          navigate(`/harnesses/${encodeURIComponent(params.agentName)}/routing`, {
             state: { openProviders: true },
           });
         }}

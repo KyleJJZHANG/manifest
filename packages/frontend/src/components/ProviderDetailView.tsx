@@ -1,17 +1,27 @@
-import { Show, createSignal, type Component, type Accessor, type Setter } from 'solid-js';
-import { Portal as SolidPortal } from 'solid-js/web';
+import {
+  Show,
+  createSignal,
+  createMemo,
+  createEffect,
+  type Component,
+  type Accessor,
+  type Setter,
+} from 'solid-js';
 import { PROVIDERS } from '../services/providers.js';
 import { providerIcon } from './ProviderIcon.js';
 import {
   connectProvider,
   disconnectProvider,
+  refreshProviderModels,
   type RoutingProvider,
   type AuthType,
 } from '../services/api.js';
 import { toast } from '../services/toast-store.js';
+import { formatTimeAgo } from '../services/formatters.js';
 import CopyButton from './CopyButton.js';
-import ProviderKeyForm from './ProviderKeyForm.js';
+import ProviderKeyForm, { MAX_KEYS_PER_PROVIDER } from './ProviderKeyForm.js';
 import OAuthDetailView from './OAuthDetailView.js';
+import AnthropicOAuthDetailView from './AnthropicOAuthDetailView.js';
 import DeviceCodeDetailView from './DeviceCodeDetailView.js';
 import { getRoutingProviderApiKeyUrl } from '../services/provider-api-key-urls.js';
 
@@ -30,7 +40,9 @@ export interface ProviderDetailViewProps {
   setValidationError: Setter<string | null>;
   onBack: () => void;
   onUpdate: () => void;
+  onPollProviders?: () => void | Promise<void>;
   onClose: () => void;
+  initialAddKey?: boolean;
 }
 
 const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
@@ -69,6 +81,7 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
   const subscriptionAuthMode = () =>
     provDef.subscriptionAuthMode ?? (provDef.subscriptionKeyPlaceholder ? 'token' : undefined);
   const isPopupOAuthFlow = () => isSubMode() && subscriptionAuthMode() === 'popup_oauth';
+  const isPopupPasteFlow = () => isSubMode() && subscriptionAuthMode() === 'popup_paste';
   const isDeviceCodeFlow = () => isSubMode() && subscriptionAuthMode() === 'device_code';
   const isCommandOnly = () =>
     isSubMode() &&
@@ -85,6 +98,30 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
       : isConnectedApiKey() || isNoKeyConnected();
   const isOllama = provDef.noKeyRequired;
 
+  const [addKeyOpen, setAddKeyOpen] = createSignal(false);
+
+  createEffect(() => {
+    if (props.initialAddKey) setAddKeyOpen(true);
+  });
+
+  const supportsMultiKey = () => props.selectedAuthType() !== 'local';
+
+  const activeKeys = createMemo(() =>
+    props.providers.filter(
+      (p) =>
+        p.provider === props.provId &&
+        p.auth_type === props.selectedAuthType() &&
+        p.is_active &&
+        p.has_api_key,
+    ),
+  );
+
+  const showAddKeyButton = () =>
+    connected() &&
+    supportsMultiKey() &&
+    activeKeys().length < MAX_KEYS_PER_PROVIDER &&
+    !addKeyOpen();
+
   const handleOllamaConnect = async () => {
     props.setBusy(true);
     try {
@@ -99,6 +136,34 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
       // error toast from fetchMutate
     } finally {
       props.setBusy(false);
+    }
+  };
+
+  const [refreshing, setRefreshing] = createSignal(false);
+
+  const activeProviderRow = () => getProviderByAuth(props.selectedAuthType());
+  const lastFetchedAgo = () => formatTimeAgo(activeProviderRow()?.models_fetched_at ?? null);
+
+  const handleRefreshModels = async () => {
+    setRefreshing(true);
+    try {
+      const result = await refreshProviderModels(
+        props.agentName,
+        props.provId,
+        props.selectedAuthType(),
+      );
+      if (result.ok) {
+        toast.success(
+          `${provDef.name}: refreshed ${result.model_count} model${result.model_count === 1 ? '' : 's'}`,
+        );
+      } else {
+        toast.error(result.error ?? `Couldn't refresh ${provDef.name}`);
+      }
+      props.onUpdate();
+    } catch {
+      // network/server error toast already raised by fetchMutate
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -143,28 +208,28 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
       {/* Title */}
       <div class="routing-modal__header" style="border: none; padding: 0; margin-bottom: 15px;">
         <div>
-          <div class="routing-modal__title">Connect providers</div>
+          <div class="routing-modal__title">Connect provider</div>
         </div>
       </div>
 
       {/* Provider row */}
-      <div class="provider-detail__header">
-        <span class="provider-detail__icon">
-          {providerIcon(props.provId, 28) ?? (
-            <span
-              class="provider-card__logo-letter"
-              style={{
-                background: provDef.color,
-                width: '32px',
-                height: '32px',
-                'font-size': '13px',
-              }}
-            >
-              {provDef.initial}
-            </span>
-          )}
-        </span>
-        <div class="provider-detail__title-group">
+      <div class="provider-detail__header" style="justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="provider-detail__icon">
+            {providerIcon(props.provId, 28) ?? (
+              <span
+                class="provider-card__logo-letter"
+                style={{
+                  background: provDef.color,
+                  width: '32px',
+                  height: '32px',
+                  'font-size': '13px',
+                }}
+              >
+                {provDef.initial}
+              </span>
+            )}
+          </span>
           <div class="provider-detail__name">
             {provDef.name}
             <Show when={provDef.beta}>
@@ -172,10 +237,69 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
             </Show>
           </div>
         </div>
-        <Show when={props.provId === 'anthropic'}>
-          <AnthropicCreditsLink />
-        </Show>
+        <div class="provider-detail__header-actions">
+          <Show when={showAddKeyButton()}>
+            <button
+              type="button"
+              class="btn btn--sm"
+              style="background: hsl(var(--foreground)); color: hsl(var(--background)); border: none; font-size: var(--font-size-xs); display: inline-flex; align-items: center; gap: 4px;"
+              onClick={() => setAddKeyOpen(true)}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                fill="currentColor"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="M4 11h11v2H4zm0-5h16v2H4zm0 10h8v2H4zm15-3h-2v3h-3v2h3v3h2v-3h3v-2h-3z" />
+              </svg>
+              {isSubMode() ? 'Add connection' : 'Add another key'}
+            </button>
+          </Show>
+        </div>
       </div>
+
+      <Show when={isSubMode() && provDef.subscriptionRequirementNote}>
+        <p style="font-size: 14px; color: hsl(var(--muted-foreground)); margin: 0 0 12px; line-height: 1.5;">
+          {provDef.subscriptionRequirementNote}
+        </p>
+      </Show>
+
+      <Show when={connected()}>
+        <div class="provider-detail__models-bar">
+          <span>
+            {activeProviderRow()?.cached_model_count ?? 0} model
+            {(activeProviderRow()?.cached_model_count ?? 0) === 1 ? '' : 's'}
+            <Show when={lastFetchedAgo()}> – last refreshed: {lastFetchedAgo()}</Show>
+          </span>
+          <button
+            class="btn btn--outline btn--sm provider-detail__refresh-btn"
+            disabled={refreshing() || props.busy()}
+            onClick={handleRefreshModels}
+            aria-label={`Refresh models from ${provDef.name}`}
+            title={`Refresh models from ${provDef.name}`}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              classList={{ 'provider-detail__refresh-icon--spinning': refreshing() }}
+            >
+              <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+              <path d="M21 3v5h-5" />
+            </svg>
+            {refreshing() ? 'Refreshing…' : 'Refresh models'}
+          </button>
+        </div>
+      </Show>
 
       {/* Subscription sign-in URL instruction (token mode with external sign-in) */}
       <Show when={isSubMode() && provDef.subscriptionSignInUrl}>
@@ -273,7 +397,30 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
           setBusy={props.setBusy}
           onBack={props.onBack}
           onUpdate={props.onUpdate}
+          onPollProviders={props.onPollProviders}
           onClose={props.onClose}
+          addKeyOpen={addKeyOpen}
+          setAddKeyOpen={setAddKeyOpen}
+          activeKeys={activeKeys}
+        />
+      </Show>
+
+      {/* Paste-code OAuth subscription (Anthropic) */}
+      <Show when={isPopupPasteFlow()}>
+        <AnthropicOAuthDetailView
+          provDef={provDef}
+          provId={props.provId}
+          agentName={props.agentName}
+          connected={connected}
+          selectedAuthType={props.selectedAuthType}
+          busy={props.busy}
+          setBusy={props.setBusy}
+          onBack={props.onBack}
+          onUpdate={props.onUpdate}
+          onClose={props.onClose}
+          addKeyOpen={addKeyOpen}
+          setAddKeyOpen={setAddKeyOpen}
+          activeKeys={activeKeys}
         />
       </Show>
 
@@ -290,6 +437,9 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
           onBack={props.onBack}
           onUpdate={props.onUpdate}
           onClose={props.onClose}
+          addKeyOpen={addKeyOpen}
+          setAddKeyOpen={setAddKeyOpen}
+          activeKeys={activeKeys}
         />
       </Show>
 
@@ -334,7 +484,15 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
       </Show>
 
       {/* API key / subscription token form (non-Ollama, non-command-only, non-OAuth) */}
-      <Show when={!isOllama && !isCommandOnly() && !isPopupOAuthFlow() && !isDeviceCodeFlow()}>
+      <Show
+        when={
+          !isOllama &&
+          !isCommandOnly() &&
+          !isPopupOAuthFlow() &&
+          !isPopupPasteFlow() &&
+          !isDeviceCodeFlow()
+        }
+      >
         <ProviderKeyForm
           provDef={provDef}
           provId={props.provId}
@@ -351,110 +509,13 @@ const ProviderDetailView: Component<ProviderDetailViewProps> = (props) => {
           validationError={props.validationError}
           setValidationError={props.setValidationError}
           getKeyPrefixDisplay={getKeyPrefixDisplay}
+          providers={props.providers}
+          addKeyOpen={addKeyOpen}
+          setAddKeyOpen={setAddKeyOpen}
           onBack={props.onBack}
           onUpdate={props.onUpdate}
         />
       </Show>
-    </div>
-  );
-};
-
-const AnthropicCreditsLink: Component = () => {
-  const [showTooltip, setShowTooltip] = createSignal(false);
-  const [tooltipPos, setTooltipPos] = createSignal({ top: 0, left: 0 });
-  let hideTimer: ReturnType<typeof setTimeout> | undefined;
-
-  const scheduleHide = () => {
-    hideTimer = setTimeout(() => setShowTooltip(false), 150);
-  };
-
-  const cancelHide = () => {
-    if (hideTimer) {
-      clearTimeout(hideTimer);
-      hideTimer = undefined;
-    }
-  };
-
-  const handleEnter = (e: MouseEvent) => {
-    cancelHide();
-    const el = e.currentTarget as HTMLElement;
-    const rect = el.getBoundingClientRect();
-    const tooltipWidth = 280;
-    let left = rect.left + rect.width / 2 - tooltipWidth / 2;
-    if (left + tooltipWidth > window.innerWidth - 8) left = window.innerWidth - tooltipWidth - 8;
-    if (left < 8) left = 8;
-    setTooltipPos({ top: rect.bottom + 4, left });
-    setShowTooltip(true);
-  };
-
-  return (
-    <div class="anthropic-credits">
-      <a
-        href="https://claude.ai/settings/usage"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="anthropic-credits__btn"
-      >
-        <svg
-          class="anthropic-credits__btn-icon"
-          xmlns="http://www.w3.org/2000/svg"
-          width="14"
-          height="14"
-          fill="currentColor"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-        >
-          <path d="m19,7h-.21c.13-.41.21-.9.21-1.5,0-1.93-1.57-3.5-3.5-3.5-1.62,0-2.7,1.48-3.4,3.09-.69-1.51-1.83-3.09-3.6-3.09-1.93,0-3.5,1.57-3.5,3.5,0,.6.08,1.09.21,1.5h-.21c-1.65,0-3,1.35-3,3,0,1.3.84,2.4,2,2.82v6.18c0,1.65,1.35,3,3,3h10c1.65,0,3-1.35,3-3v-6.18c1.16-.41,2-1.51,2-2.82,0-1.65-1.35-3-3-3Zm-3.5-3c.83,0,1.5.67,1.5,1.5,0,1.5-.63,1.5-1,1.5h-2.48c.51-1.58,1.25-3,1.98-3Zm-8.5,1.5c0-.83.67-1.5,1.5-1.5.89,0,1.71,1.53,2.2,3h-2.7c-.37,0-1,0-1-1.5Zm-2,3.5h6v2h-6c-.55,0-1-.45-1-1s.45-1,1-1Zm2,11c-.55,0-1-.45-1-1v-6h5v7h-4Zm10,0h-4v-7h5v6c0,.55-.45,1-1,1Zm2-9h-6v-1.92s.01-.06.02-.08h5.98c.55,0,1,.45,1,1s-.45,1-1,1Z" />
-        </svg>
-        Claim your credits on Claude
-      </a>
-      <div
-        class="anthropic-credits__info-wrapper"
-        onMouseEnter={handleEnter}
-        onMouseLeave={scheduleHide}
-      >
-        <svg
-          class="anthropic-credits__info-icon"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <circle cx="12" cy="12" r="10" />
-          <path d="M12 16v-4" />
-          <path d="M12 8h.01" />
-        </svg>
-        <Show when={showTooltip()}>
-          <SolidPortal>
-            <div
-              class="anthropic-credits__tooltip"
-              style={{ top: `${tooltipPos().top}px`, left: `${tooltipPos().left}px` }}
-              onMouseEnter={cancelHide}
-              onMouseLeave={scheduleHide}
-            >
-              <p>
-                Anthropic offers extra API credits to eligible Pro, Max, and Team plan subscribers.
-                Click the link to check your eligibility and available credits.
-              </p>
-              <p>
-                If you're not eligible, the page may not be accessible.{' '}
-                <a
-                  href="https://support.claude.com/en/articles/14246053-extra-usage-credit-for-pro-max-and-team-plans"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Learn more about eligibility
-                </a>
-              </p>
-            </div>
-          </SolidPortal>
-        </Show>
-      </div>
     </div>
   );
 };

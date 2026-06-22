@@ -6,7 +6,6 @@ import ErrorState from '../components/ErrorState.jsx';
 import AgentTypeGrid from '../components/AgentTypeGrid.jsx';
 import SetupStepAddProvider from '../components/SetupStepAddProvider.jsx';
 import SetupModal from '../components/SetupModal.jsx';
-import DuplicateAgentModal from '../components/DuplicateAgentModal.jsx';
 import { agentDisplayName } from '../services/agent-display-name.js';
 import {
   deleteAgent,
@@ -45,7 +44,6 @@ const Settings: Component = () => {
   );
   const [showTypeModal, setShowTypeModal] = createSignal(false);
   const [showSetupModal, setShowSetupModal] = createSignal(false);
-  const [showDuplicateModal, setShowDuplicateModal] = createSignal(false);
   const [modalCategory, setModalCategory] = createSignal<AgentCategory | null>(null);
   const [modalPlatform, setModalPlatform] = createSignal<AgentPlatform | null>(null);
   const [savingType, setSavingType] = createSignal(false);
@@ -85,6 +83,42 @@ const Settings: Component = () => {
   const [keyRevealed, setKeyRevealed] = createSignal(false);
   const keyData = () => (apiKeyData.error ? undefined : apiKeyData());
   const fullKey = () => rotatedKey() ?? keyData()?.apiKey ?? null;
+
+  const logging = () => agentInfo()?.record_messages === true;
+  const [togglingLogs, setTogglingLogs] = createSignal(false);
+  const [showDisableLogsModal, setShowDisableLogsModal] = createSignal(false);
+
+  const handleToggleLogs = async (next: boolean) => {
+    if (togglingLogs()) return;
+    if (!next) {
+      setShowDisableLogsModal(true);
+      return;
+    }
+    setTogglingLogs(true);
+    try {
+      await updateAgent(agentName(), { record_messages: true });
+      await refetchInfo();
+      toast.success('Logs enabled');
+    } catch {
+      /* error toast handled by fetchMutate */
+    } finally {
+      setTogglingLogs(false);
+    }
+  };
+
+  const confirmDisableLogs = async () => {
+    setShowDisableLogsModal(false);
+    setTogglingLogs(true);
+    try {
+      await updateAgent(agentName(), { record_messages: false });
+      await refetchInfo();
+      toast.success('Logs disabled');
+    } catch {
+      /* error toast handled by fetchMutate */
+    } finally {
+      setTogglingLogs(false);
+    }
+  };
   const displayedKey = () => {
     const key = fullKey();
     if (!key) return `${keyData()?.keyPrefix ?? '...'}...`;
@@ -97,6 +131,18 @@ const Settings: Component = () => {
     return `${window.location.origin}/v1`;
   };
 
+  const handleDeleteAgent = async () => {
+    if (deleteConfirmName() !== agentName() || deleting()) return;
+    setDeleting(true);
+    try {
+      await deleteAgent(agentName());
+      toast.success(`Harness "${agentName()}" deleted`);
+      navigate('/harnesses', { replace: true });
+    } catch {
+      setDeleting(false);
+    }
+  };
+
   const nameChanged = () => name().trim() !== agentName() && name().trim() !== '';
 
   const handleSaveName = async () => {
@@ -106,7 +152,7 @@ const Settings: Component = () => {
       const result = await renameAgent(agentName(), name().trim());
       const slug = (result?.name as string) ?? name().trim();
       markAgentCreated(slug);
-      window.location.replace(`/agents/${encodeURIComponent(slug)}/settings`);
+      window.location.replace(`/harnesses/${encodeURIComponent(slug)}/settings`);
     } catch {
       setName(agentName());
     } finally {
@@ -136,30 +182,24 @@ const Settings: Component = () => {
         name="description"
         content={`Configure settings for ${agentDisplayName() ?? agentName()}.`}
       />
-      <div class="page-header">
-        <div>
-          <h1>Settings</h1>
-          <span class="breadcrumb">
-            {agentDisplayName() ?? agentName()} &rsaquo; Rename your agent, manage API keys, and
-            view setup instructions
-          </span>
-        </div>
-      </div>
+      <p style="color: hsl(var(--muted-foreground)); font-size: var(--font-size-sm); margin: 0 0 var(--gap-lg);">
+        Rename your agent, manage API keys, and view setup instructions
+      </p>
 
-      {/* -- Agent Name ------------------------------ */}
+      {/* -- Harness Name ------------------------------ */}
       <div class="settings-card">
         <div class="settings-card__row">
           <div class="settings-card__label">
-            <span class="settings-card__label-title">Agent name</span>
+            <span class="settings-card__label-title">Harness name</span>
             <span class="settings-card__label-desc">
-              The display name for this agent across the dashboard.
+              The display name for this harness across the dashboard.
             </span>
           </div>
           <div class="settings-card__control">
             <input
               class="settings-card__input"
               type="text"
-              aria-label="Agent name"
+              aria-label="Harness name"
               value={name()}
               onInput={(e) => setName(e.currentTarget.value)}
             />
@@ -183,8 +223,8 @@ const Settings: Component = () => {
         </div>
       </div>
 
-      {/* -- Agent Type (read-only + change modal) --- */}
-      <h3 class="settings-section__title">Agent type</h3>
+      {/* -- Harness Type (read-only + change modal) --- */}
+      <h2 class="settings-section__title">Harness type</h2>
       <div class="settings-card">
         <div class="settings-card__row">
           <div class="settings-card__label">
@@ -212,7 +252,7 @@ const Settings: Component = () => {
                 : ''}
             </span>
           </div>
-          <div class="settings-card__control" style="display: flex; justify-content: flex-end;">
+          <div class="settings-card__control settings-card__control--end">
             <button class="btn btn--outline btn--sm" onClick={openTypeModal}>
               Change
             </button>
@@ -231,13 +271,13 @@ const Settings: Component = () => {
           />
         )}
       >
-        <h3 class="settings-section__title">API Key</h3>
+        <h2 class="settings-section__title">API Key</h2>
         <div class="settings-card">
           <div class="settings-card__body">
-            <span class="settings-card__label-title">Agent API key</span>
+            <span class="settings-card__label-title">Harness API key</span>
             <span class="settings-card__label-desc" style="font-size: 14px;">
-              This key authenticates your agent's requests to Manifest. Rotating it generates a new
-              key and immediately invalidates the current one.
+              This key authenticates your harness's requests to Manifest. Rotating it generates a
+              new key and immediately invalidates the current one.
             </span>
             <div class="settings-card__key-row">
               <code class="settings-card__key-value">{displayedKey()}</code>
@@ -298,7 +338,7 @@ const Settings: Component = () => {
         </div>
 
         {/* -- Setup Instructions ---------------------- */}
-        <h3 class="settings-section__title">Setup</h3>
+        <h2 class="settings-section__title">Setup</h2>
         <Show
           when={!apiKeyData.loading}
           fallback={<div class="skeleton skeleton--rect" style="width: 100%; height: 200px;" />}
@@ -321,34 +361,59 @@ const Settings: Component = () => {
         </Show>
       </ErrorBoundary>
 
-      {/* -- Duplicate ---------------------------------- */}
-      <h3 class="settings-section__title">Duplicate</h3>
-      <div class="settings-card">
-        <div class="settings-card__row">
-          <div class="settings-card__label">
-            <span class="settings-card__label-title">Duplicate this agent</span>
-            <span class="settings-card__label-desc">
-              Creates a new agent with the same providers, routing tiers, and specificity overrides.
-              A fresh API key is generated. Messages and history stay with this agent.
-            </span>
-          </div>
-          <div class="settings-card__control">
-            <button class="btn btn--outline btn--sm" onClick={() => setShowDuplicateModal(true)}>
-              Duplicate agent
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* -- Danger Zone -------------------------------- */}
-      <h3 class="settings-section__title settings-section__title--danger">Danger zone</h3>
+      <h2 class="settings-section__title settings-section__title--danger">Danger zone</h2>
       <div class="settings-card settings-card--danger">
         <div class="settings-card__row">
           <div class="settings-card__label">
-            <span class="settings-card__label-title">Delete this agent</span>
+            <Show
+              when={logging()}
+              fallback={
+                <>
+                  <span class="settings-card__label-title">Enable message logs</span>
+                  <span class="settings-card__label-desc">
+                    Capture every request and response to get full visibility on your harness's
+                    conversations, model choices, and performance.
+                  </span>
+                </>
+              }
+            >
+              <span class="settings-card__label-title">Disable message logs</span>
+              <span class="settings-card__label-desc">
+                Stop capturing requests and responses. You will lose visibility on conversations and
+                troubleshooting data.
+              </span>
+            </Show>
+          </div>
+          <div class="settings-card__control">
+            <Show
+              when={logging()}
+              fallback={
+                <button
+                  class="btn btn--danger btn--sm"
+                  onClick={() => handleToggleLogs(true)}
+                  disabled={togglingLogs() || agentInfo.loading}
+                >
+                  {togglingLogs() ? <span class="spinner" /> : 'Enable logs'}
+                </button>
+              }
+            >
+              <button
+                class="btn btn--danger btn--sm"
+                onClick={() => handleToggleLogs(false)}
+                disabled={togglingLogs() || agentInfo.loading}
+              >
+                {togglingLogs() ? <span class="spinner" /> : 'Disable logs'}
+              </button>
+            </Show>
+          </div>
+        </div>
+        <div class="settings-card__row">
+          <div class="settings-card__label">
+            <span class="settings-card__label-title">Delete this harness</span>
             <span class="settings-card__label-desc">
-              Permanently delete this agent, its API key, and all recorded messages and analytics.
-              This action cannot be undone.
+              Permanently delete this harness, its API key, and all messages and analytics. This
+              action cannot be undone.
             </span>
           </div>
           <div class="settings-card__control">
@@ -359,7 +424,7 @@ const Settings: Component = () => {
                 setDeleteConfirmName('');
               }}
             >
-              Delete agent
+              Delete harness
             </button>
           </div>
         </div>
@@ -382,6 +447,12 @@ const Settings: Component = () => {
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-agent-modal-title"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && e.target instanceof HTMLInputElement) {
+                e.preventDefault();
+                handleDeleteAgent();
+              }
+            }}
           >
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--gap-lg);">
               <h3 id="delete-agent-modal-title" style="margin: 0; font-size: var(--font-size-lg);">
@@ -410,7 +481,7 @@ const Settings: Component = () => {
             </div>
             <p style="font-size: var(--font-size-sm); color: hsl(var(--muted-foreground)); margin-bottom: var(--gap-md);">
               This will permanently delete the{' '}
-              <strong style="color: hsl(var(--foreground));">{agentName()}</strong> agent and all
+              <strong style="color: hsl(var(--foreground));">{agentName()}</strong> harness and all
               its data. This action cannot be undone.
             </p>
             <label
@@ -420,6 +491,7 @@ const Settings: Component = () => {
               To confirm, type <strong>"{agentName()}"</strong> in the box below
             </label>
             <input
+              ref={(el) => setTimeout(() => el.focus(), 200)}
               id="delete-confirm-input"
               class="auth-form__input"
               type="text"
@@ -432,16 +504,7 @@ const Settings: Component = () => {
               class="btn btn--danger btn--sm"
               style="width: 100%;"
               disabled={deleteConfirmName() !== agentName() || deleting()}
-              onClick={async () => {
-                setDeleting(true);
-                try {
-                  await deleteAgent(agentName());
-                  toast.success(`Agent "${agentName()}" deleted`);
-                  navigate('/', { replace: true });
-                } catch {
-                  setDeleting(false);
-                }
-              }}
+              onClick={handleDeleteAgent}
             >
               {deleting() ? (
                 <>
@@ -449,9 +512,83 @@ const Settings: Component = () => {
                   <span class="sr-only">Deleting...</span>
                 </>
               ) : (
-                'Delete this agent'
+                'Delete this harness'
               )}
             </button>
+          </div>
+        </div>
+      </Show>
+
+      {/* -- Disable Logs Modal ------------------------ */}
+      <Show when={showDisableLogsModal()}>
+        <div
+          class="modal-overlay"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowDisableLogsModal(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setShowDisableLogsModal(false);
+          }}
+        >
+          <div
+            class="modal-card"
+            style="max-width: 440px;"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="disable-logs-modal-title"
+          >
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--gap-lg);">
+              <h3 id="disable-logs-modal-title" style="margin: 0; font-size: var(--font-size-lg);">
+                Disable logs
+              </h3>
+              <button
+                style="background: none; border: none; cursor: pointer; color: hsl(var(--muted-foreground)); padding: 4px;"
+                onClick={() => setShowDisableLogsModal(false)}
+                aria-label="Close"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M18 6 6 18" />
+                  <path d="m6 6 12 12" />
+                </svg>
+              </button>
+            </div>
+            <p style="font-size: var(--font-size-sm); color: hsl(var(--muted-foreground)); margin-bottom: var(--gap-sm);">
+              Without logs, you will lose visibility on:
+            </p>
+            <ul style="font-size: var(--font-size-sm); color: hsl(var(--muted-foreground)); margin: 0 0 var(--gap-md) 0; padding-left: 20px; line-height: 1.7;">
+              <li>
+                <strong style="color: hsl(var(--foreground));">Conversation context:</strong> no way
+                to review what your harness sent or received
+              </li>
+              <li>
+                <strong style="color: hsl(var(--foreground));">Troubleshooting:</strong> no data to
+                diagnose unexpected responses
+              </li>
+            </ul>
+            <p style="font-size: var(--font-size-sm); color: hsl(var(--muted-foreground)); margin-bottom: var(--gap-lg);">
+              Existing logs will be kept.
+            </p>
+            <div style="display: flex; gap: var(--gap-sm); justify-content: flex-end;">
+              <button
+                class="btn btn--primary btn--sm"
+                onClick={() => setShowDisableLogsModal(false)}
+              >
+                Cancel
+              </button>
+              <button class="btn btn--danger btn--sm" onClick={confirmDisableLogs}>
+                Disable logs
+              </button>
+            </div>
           </div>
         </div>
       </Show>
@@ -476,9 +613,9 @@ const Settings: Component = () => {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 class="modal-card__title" id="change-type-modal-title">
-              Change agent type
+              Change harness type
             </h2>
-            <p class="modal-card__desc">Select the new type and platform for this agent.</p>
+            <p class="modal-card__desc">Select the new type and platform for this harness.</p>
 
             <AgentTypeGrid
               category={modalCategory()}
@@ -511,12 +648,6 @@ const Settings: Component = () => {
         agentCategory={currentCategory()}
         onClose={() => setShowSetupModal(false)}
         onDone={() => setShowSetupModal(false)}
-      />
-
-      <DuplicateAgentModal
-        open={showDuplicateModal()}
-        sourceName={agentName()}
-        onClose={() => setShowDuplicateModal(false)}
       />
     </div>
   );

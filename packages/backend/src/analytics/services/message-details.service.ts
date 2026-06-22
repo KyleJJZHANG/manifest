@@ -5,8 +5,9 @@ import { AgentMessage } from '../../entities/agent-message.entity';
 import { LlmCall } from '../../entities/llm-call.entity';
 import { ToolExecution } from '../../entities/tool-execution.entity';
 import { AgentLog } from '../../entities/agent-log.entity';
-import { TenantCacheService } from '../../common/services/tenant-cache.service';
+import { MessageRecording, RecordingResponseBody } from '../../entities/message-recording.entity';
 import type { CallerAttribution } from '../../routing/proxy/caller-classifier';
+import type { RequestParamDefaults } from 'manifest-shared';
 
 export interface MessageDetailResponse {
   message: {
@@ -31,6 +32,7 @@ export interface MessageDetailResponse {
     specificity_category: string | null;
     specificity_miscategorized: boolean;
     auth_type: string | null;
+    provider_key_label: string | null;
     skill_name: string | null;
     fallback_from_model: string | null;
     fallback_index: number | null;
@@ -39,11 +41,20 @@ export interface MessageDetailResponse {
     feedback_tags: string[] | null;
     feedback_details: string | null;
     request_headers: Record<string, string> | null;
+    request_params: RequestParamDefaults | null;
     caller_attribution: CallerAttribution | null;
     header_tier_id: string | null;
     header_tier_name: string | null;
     header_tier_color: string | null;
+    recorded: boolean;
   };
+  recording: {
+    request_body: Record<string, unknown> | null;
+    response_body: RecordingResponseBody | null;
+    response_headers: Record<string, string> | null;
+    size_bytes: number | null;
+    created_at: string;
+  } | null;
   llm_calls: {
     id: string;
     call_index: number | null;
@@ -88,26 +99,25 @@ export class MessageDetailsService {
     private readonly toolRepo: Repository<ToolExecution>,
     @InjectRepository(AgentLog)
     private readonly logRepo: Repository<AgentLog>,
-    private readonly tenantCache: TenantCacheService,
+    @InjectRepository(MessageRecording)
+    private readonly recordingRepo: Repository<MessageRecording>,
   ) {}
 
-  async getDetails(messageId: string, userId: string): Promise<MessageDetailResponse> {
-    const tenantId = await this.tenantCache.resolve(userId);
+  async getDetails(messageId: string, tenantId: string | null): Promise<MessageDetailResponse> {
+    // No tenant → no messages, so any id is unknown.
+    if (!tenantId) throw new NotFoundException('Message not found');
 
-    const messageQb = this.messageRepo
+    const message = await this.messageRepo
       .createQueryBuilder('m')
-      .where('m.id = :id', { id: messageId });
-    if (tenantId) {
-      messageQb.andWhere('m.tenant_id = :tenantId', { tenantId });
-    } else {
-      messageQb.andWhere('m.user_id = :userId', { userId });
-    }
-    const message = await messageQb.getOne();
+      .where('m.id = :id', { id: messageId })
+      .andWhere('m.tenant_id = :tenantId', { tenantId })
+      .getOne();
     if (!message) throw new NotFoundException('Message not found');
 
     const llmCallsQb = this.llmCallRepo
       .createQueryBuilder('lc')
       .where('lc.turn_id = :turnId', { turnId: messageId })
+      .andWhere('lc.tenant_id = :tenantId', { tenantId })
       .orderBy('lc.call_index', 'ASC')
       .addOrderBy('lc.timestamp', 'ASC');
 
@@ -115,12 +125,18 @@ export class MessageDetailsService {
       ? this.logRepo
           .createQueryBuilder('al')
           .where('al.trace_id = :traceId', { traceId: message.trace_id })
+          .andWhere('al.tenant_id = :tenantId', { tenantId })
           .orderBy('al.timestamp', 'ASC')
       : null;
 
-    const [llmCalls, agentLogs] = await Promise.all([
+    const recordingPromise = message.recorded
+      ? this.recordingRepo.findOne({ where: { message_id: message.id } })
+      : Promise.resolve(null);
+
+    const [llmCalls, agentLogs, recording] = await Promise.all([
       llmCallsQb.getMany(),
       logsQb ? logsQb.getMany() : Promise.resolve([]),
+      recordingPromise,
     ]);
 
     const llmCallIds = llmCalls.map((lc) => lc.id);
@@ -129,6 +145,7 @@ export class MessageDetailsService {
         ? await this.toolRepo
             .createQueryBuilder('te')
             .where('te.llm_call_id IN (:...ids)', { ids: llmCallIds })
+            .andWhere('te.tenant_id = :tenantId', { tenantId })
             .orderBy('te.llm_call_id', 'ASC')
             .getMany()
         : [];
@@ -156,6 +173,7 @@ export class MessageDetailsService {
         specificity_category: message.specificity_category,
         specificity_miscategorized: message.specificity_miscategorized,
         auth_type: message.auth_type,
+        provider_key_label: message.provider_key_label,
         skill_name: message.skill_name,
         fallback_from_model: message.fallback_from_model,
         fallback_index: message.fallback_index,
@@ -164,11 +182,22 @@ export class MessageDetailsService {
         feedback_tags: message.feedback_tags ? message.feedback_tags.split(',') : null,
         feedback_details: message.feedback_details,
         request_headers: message.request_headers,
+        request_params: message.request_params as RequestParamDefaults | null,
         caller_attribution: message.caller_attribution,
         header_tier_id: message.header_tier_id,
         header_tier_name: message.header_tier_name,
         header_tier_color: message.header_tier_color,
+        recorded: message.recorded,
       },
+      recording: recording
+        ? {
+            request_body: recording.request_body,
+            response_body: recording.response_body,
+            response_headers: recording.response_headers,
+            size_bytes: recording.size_bytes,
+            created_at: recording.created_at,
+          }
+        : null,
       llm_calls: llmCalls.map((lc) => ({
         id: lc.id,
         call_index: lc.call_index,

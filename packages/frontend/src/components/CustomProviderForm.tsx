@@ -4,12 +4,19 @@ import {
   deleteCustomProvider,
   probeCustomProvider,
   updateCustomProvider,
+  type CustomProviderApiKind,
   type CustomProviderModel,
   type CustomProviderData,
 } from '../services/api.js';
 import { toast } from '../services/toast-store.js';
 import { checkIsSelfHosted } from '../services/setup-status.js';
 import type { CustomProviderPrefill } from '../services/routing-params.js';
+import InfoTooltip from './InfoTooltip.jsx';
+
+const BASE_URL_PLACEHOLDERS: Record<CustomProviderApiKind, string> = {
+  openai: 'https://api.example.com/v1',
+  anthropic: 'https://api.anthropic.com',
+};
 
 interface Props {
   agentName: string;
@@ -24,17 +31,26 @@ interface ModelRow {
   model_name: string;
   input_price: string;
   output_price: string;
+  price_estimated: boolean;
 }
 
-const emptyRow = (): ModelRow => ({ model_name: '', input_price: '', output_price: '' });
+const ESTIMATED_PRICE_TOOLTIP = 'Estimated price. This may not be accurate.';
 
-const toModelRows = (models: CustomProviderModel[]): ModelRow[] =>
-  models.map((m) => ({
+const emptyRow = (): ModelRow => ({
+  model_name: '',
+  input_price: '',
+  output_price: '',
+  price_estimated: false,
+});
+
+const toModelRows = (models: CustomProviderModel[] | undefined): ModelRow[] =>
+  (models ?? []).map((m) => ({
     model_name: m.model_name,
     input_price:
       m.input_price_per_million_tokens != null ? String(m.input_price_per_million_tokens) : '',
     output_price:
       m.output_price_per_million_tokens != null ? String(m.output_price_per_million_tokens) : '',
+    price_estimated: m.price_estimated === true,
   }));
 
 const CustomProviderForm: Component<Props> = (props) => {
@@ -46,12 +62,16 @@ const CustomProviderForm: Component<Props> = (props) => {
       model_name: m.model_name,
       input_price: m.input_price ?? '',
       output_price: m.output_price ?? '',
+      price_estimated: false,
     }));
   };
 
   const [name, setName] = createSignal(props.initialData?.name ?? props.prefill?.name ?? '');
   const [baseUrl, setBaseUrl] = createSignal(
     props.initialData?.base_url ?? props.prefill?.baseUrl ?? '',
+  );
+  const [apiKind, setApiKind] = createSignal<CustomProviderApiKind>(
+    props.initialData?.api_kind ?? 'openai',
   );
   const [apiKey, setApiKey] = createSignal(props.prefill?.apiKey ?? '');
   const [editingKey, setEditingKey] = createSignal(false);
@@ -78,12 +98,14 @@ const CustomProviderForm: Component<Props> = (props) => {
         props.agentName,
         url,
         apiKey().trim() || undefined,
+        apiKind(),
+        name().trim() || undefined,
       );
       if (models.length === 0) {
         setProbeError('Server returned no models');
         return;
       }
-      setRows(models.map((m) => ({ model_name: m.model_name, input_price: '', output_price: '' })));
+      setRows(toModelRows(models));
     } catch (e) {
       setProbeError(e instanceof Error ? e.message : 'Probe failed');
     } finally {
@@ -91,8 +113,14 @@ const CustomProviderForm: Component<Props> = (props) => {
     }
   };
 
-  const updateRow = (index: number, field: keyof ModelRow, value: string) => {
-    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, [field]: value } : r)));
+  const updateRow = (
+    index: number,
+    field: 'model_name' | 'input_price' | 'output_price',
+    value: string,
+  ) => {
+    setRows((prev) =>
+      prev.map((r, i) => (i === index ? { ...r, [field]: value, price_estimated: false } : r)),
+    );
   };
 
   const addRow = () => setRows((prev) => [...prev, emptyRow()]);
@@ -102,6 +130,7 @@ const CustomProviderForm: Component<Props> = (props) => {
   };
 
   const validModels = () => rows().filter((r) => r.model_name.trim());
+  const hasEstimatedPrices = () => rows().some((r) => r.price_estimated);
 
   const canSubmit = () => name().trim() && baseUrl().trim() && validModels().length > 0 && !busy();
 
@@ -116,6 +145,9 @@ const CustomProviderForm: Component<Props> = (props) => {
       ...(r.output_price !== ''
         ? { output_price_per_million_tokens: parsePrice(r.output_price) }
         : {}),
+      ...(r.price_estimated && (r.input_price !== '' || r.output_price !== '')
+        ? { price_estimated: true }
+        : {}),
     }));
 
   const handleCreate = async () => {
@@ -125,6 +157,7 @@ const CustomProviderForm: Component<Props> = (props) => {
       await createCustomProvider(props.agentName, {
         name: name().trim(),
         base_url: baseUrl().trim(),
+        api_kind: apiKind(),
         apiKey: apiKey().trim() || undefined,
         models: buildModels(),
       });
@@ -199,7 +232,9 @@ const CustomProviderForm: Component<Props> = (props) => {
           <div class="routing-modal__title">
             {isEdit() ? 'Edit custom provider' : 'Add custom provider'}
           </div>
-          <div class="routing-modal__subtitle">Connect any OpenAI-compatible endpoint</div>
+          <div class="routing-modal__subtitle">
+            Connect any OpenAI- or Anthropic-compatible endpoint
+          </div>
         </div>
       </div>
 
@@ -214,6 +249,7 @@ const CustomProviderForm: Component<Props> = (props) => {
             Provider name
           </label>
           <input
+            ref={(el) => requestAnimationFrame(() => el.focus())}
             id="cp-name"
             class="provider-detail__input"
             type="text"
@@ -226,6 +262,53 @@ const CustomProviderForm: Component<Props> = (props) => {
           />
         </div>
 
+        <fieldset
+          class="provider-detail__format"
+          aria-describedby="cp-format-help"
+          disabled={isEdit()}
+        >
+          <legend class="provider-detail__format-legend">API format</legend>
+          <div class="provider-detail__format-options" role="radiogroup">
+            <label
+              class={`provider-detail__format-option${
+                apiKind() === 'openai' ? ' provider-detail__format-option--active' : ''
+              }${isEdit() ? ' provider-detail__format-option--disabled' : ''}`}
+            >
+              <input
+                type="radio"
+                name="cp-api-format"
+                value="openai"
+                checked={apiKind() === 'openai'}
+                disabled={isEdit()}
+                onChange={() => setApiKind('openai')}
+              />
+              <span class="provider-detail__format-option-title">OpenAI</span>
+              <span class="provider-detail__format-option-path">/v1/chat/completions</span>
+            </label>
+            <label
+              class={`provider-detail__format-option${
+                apiKind() === 'anthropic' ? ' provider-detail__format-option--active' : ''
+              }${isEdit() ? ' provider-detail__format-option--disabled' : ''}`}
+            >
+              <input
+                type="radio"
+                name="cp-api-format"
+                value="anthropic"
+                checked={apiKind() === 'anthropic'}
+                disabled={isEdit()}
+                onChange={() => setApiKind('anthropic')}
+              />
+              <span class="provider-detail__format-option-title">Anthropic</span>
+              <span class="provider-detail__format-option-path">/v1/messages</span>
+            </label>
+          </div>
+          <p id="cp-format-help" class="provider-detail__format-help">
+            <Show when={isEdit()} fallback={<>Most providers use OpenAI format.</>}>
+              Format can't be changed after creation. Delete and recreate to switch.
+            </Show>
+          </p>
+        </fieldset>
+
         <div class="provider-detail__field">
           <label class="provider-detail__label" for="cp-base-url">
             Base URL
@@ -235,7 +318,7 @@ const CustomProviderForm: Component<Props> = (props) => {
               id="cp-base-url"
               class="provider-detail__input"
               type="url"
-              placeholder="https://api.example.com/v1"
+              placeholder={BASE_URL_PLACEHOLDERS[apiKind()]}
               value={baseUrl()}
               onInput={(e) => {
                 setBaseUrl(e.currentTarget.value);
@@ -248,7 +331,11 @@ const CustomProviderForm: Component<Props> = (props) => {
               class="btn btn--outline btn--sm"
               onClick={handleProbe}
               disabled={probeBusy() || !baseUrl().trim()}
-              aria-label="Fetch models from the server's /v1/models endpoint"
+              aria-label={
+                apiKind() === 'anthropic'
+                  ? "Fetch models from the server's /v1/models endpoint"
+                  : "Fetch models from the server's /models endpoint"
+              }
             >
               {probeBusy() ? <span class="spinner" /> : 'Fetch models'}
             </button>
@@ -258,9 +345,9 @@ const CustomProviderForm: Component<Props> = (props) => {
               class="provider-detail__hint"
               style="font-size: var(--font-size-xs); color: hsl(var(--muted-foreground)); margin-top: 4px;"
             >
-              For local servers use <code>http://host.docker.internal:&lt;port&gt;</code> (Docker)
-              or <code>http://localhost:&lt;port&gt;</code> (native). HTTPS required for public
-              URLs.
+              For local servers use <code>http://host.docker.internal:&lt;port&gt;</code> (Docker),{' '}
+              <code>http://host.containers.internal:&lt;port&gt;</code> (Podman), or{' '}
+              <code>http://localhost:&lt;port&gt;</code> (native). HTTPS required for public URLs.
             </div>
           </Show>
           <Show when={probeError()}>
@@ -313,8 +400,25 @@ const CustomProviderForm: Component<Props> = (props) => {
         </div>
 
         <div class="provider-detail__field">
-          <label class="provider-detail__label">Models</label>
-          <div class="custom-provider-models">
+          <div id="cp-models-label" class="provider-detail__label custom-provider-models__label">
+            Models
+            <Show when={hasEstimatedPrices()}>
+              <InfoTooltip text={ESTIMATED_PRICE_TOOLTIP} />
+            </Show>
+          </div>
+          <div class="custom-provider-models" aria-labelledby="cp-models-label">
+            <div class="custom-provider-models__columns" aria-hidden="true">
+              <span class="custom-provider-models__column custom-provider-models__column--name">
+                Model name
+              </span>
+              <span class="custom-provider-models__column custom-provider-models__column--price">
+                Input / 1M tokens
+              </span>
+              <span class="custom-provider-models__column custom-provider-models__column--price">
+                Output / 1M tokens
+              </span>
+              <span class="custom-provider-models__column-spacer" />
+            </div>
             <Index each={rows()}>
               {(row, i) => (
                 <div class="custom-provider-model-row">

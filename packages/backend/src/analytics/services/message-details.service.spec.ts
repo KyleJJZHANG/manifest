@@ -6,7 +6,7 @@ import { AgentMessage } from '../../entities/agent-message.entity';
 import { LlmCall } from '../../entities/llm-call.entity';
 import { ToolExecution } from '../../entities/tool-execution.entity';
 import { AgentLog } from '../../entities/agent-log.entity';
-import { TenantCacheService } from '../../common/services/tenant-cache.service';
+import { MessageRecording } from '../../entities/message-recording.entity';
 
 function mockQb(result: unknown = null) {
   const qb: Record<string, jest.Mock> = {
@@ -22,11 +22,11 @@ function mockQb(result: unknown = null) {
 
 describe('MessageDetailsService', () => {
   let service: MessageDetailsService;
-  let mockTenantResolve: jest.Mock;
   let msgQb: ReturnType<typeof mockQb>;
   let llmQb: ReturnType<typeof mockQb>;
   let toolQb: ReturnType<typeof mockQb>;
   let logQb: ReturnType<typeof mockQb>;
+  let recordingFindOne: jest.Mock;
 
   const baseMessage = {
     id: 'msg-1',
@@ -54,16 +54,18 @@ describe('MessageDetailsService', () => {
     fallback_from_model: null,
     fallback_index: null,
     session_key: 'sess-001',
-    user_id: 'u1',
     feedback_rating: null,
     feedback_tags: null,
     feedback_details: null,
     request_headers: null,
+    request_params: null,
     caller_attribution: null,
+    recorded: false,
+    specificity_category: null,
+    specificity_miscategorized: false,
   };
 
   beforeEach(async () => {
-    mockTenantResolve = jest.fn().mockResolvedValue('tenant-123');
     msgQb = mockQb(baseMessage);
     llmQb = mockQb([]);
     toolQb = mockQb([]);
@@ -89,8 +91,8 @@ describe('MessageDetailsService', () => {
           useValue: { createQueryBuilder: jest.fn().mockReturnValue(logQb) },
         },
         {
-          provide: TenantCacheService,
-          useValue: { resolve: mockTenantResolve },
+          provide: getRepositoryToken(MessageRecording),
+          useValue: { findOne: (recordingFindOne = jest.fn().mockResolvedValue(null)) },
         },
       ],
     }).compile();
@@ -115,16 +117,34 @@ describe('MessageDetailsService', () => {
   });
 
   it('filters by tenantId when tenant exists', async () => {
-    await service.getDetails('msg-1', 'u1');
+    await service.getDetails('msg-1', 'tenant-123');
     expect(msgQb.andWhere).toHaveBeenCalledWith('m.tenant_id = :tenantId', {
       tenantId: 'tenant-123',
     });
   });
 
-  it('filters by userId when tenant does not exist', async () => {
-    mockTenantResolve.mockResolvedValue(null);
-    await service.getDetails('msg-1', 'u1');
-    expect(msgQb.andWhere).toHaveBeenCalledWith('m.user_id = :userId', { userId: 'u1' });
+  it('throws NotFoundException when tenant is null (no tenant scope)', async () => {
+    await expect(service.getDetails('msg-1', null)).rejects.toThrow(NotFoundException);
+    expect(msgQb.andWhere).not.toHaveBeenCalled();
+  });
+
+  it('tenant-scopes the llm_calls, agent_logs, and tool_executions child queries', async () => {
+    // An llm call is needed so the tool_executions query runs (llmCallIds.length > 0).
+    llmQb.getMany.mockResolvedValue([{ id: 'lc-1', call_index: 0 }]);
+
+    await service.getDetails('msg-1', 'tenant-xyz');
+
+    // trace_id child lookups must not rely on the parent gate alone: a forged/colliding
+    // trace_id off attacker-supplied telemetry could otherwise surface another tenant's rows.
+    expect(llmQb.andWhere).toHaveBeenCalledWith('lc.tenant_id = :tenantId', {
+      tenantId: 'tenant-xyz',
+    });
+    expect(logQb.andWhere).toHaveBeenCalledWith('al.tenant_id = :tenantId', {
+      tenantId: 'tenant-xyz',
+    });
+    expect(toolQb.andWhere).toHaveBeenCalledWith('te.tenant_id = :tenantId', {
+      tenantId: 'tenant-xyz',
+    });
   });
 
   it('returns related llm calls', async () => {
@@ -241,7 +261,11 @@ describe('MessageDetailsService', () => {
       feedback_tags: null,
       feedback_details: null,
       request_headers: null,
+      request_params: null,
       caller_attribution: null,
+      recorded: false,
+      specificity_category: null,
+      specificity_miscategorized: false,
     });
   });
 
@@ -257,6 +281,56 @@ describe('MessageDetailsService', () => {
     msgQb.getOne.mockResolvedValue({ ...baseMessage, request_headers: headers });
     const result = await service.getDetails('msg-1', 'u1');
     expect(result.message.request_headers).toEqual(headers);
+  });
+
+  it('returns request_params when stored on the message', async () => {
+    const params = { thinking: { type: 'disabled' } };
+    msgQb.getOne.mockResolvedValue({ ...baseMessage, request_params: params });
+    const result = await service.getDetails('msg-1', 'u1');
+    expect(result.message.request_params).toEqual(params);
+  });
+
+  it('round-trips arbitrary multi-key request_params shapes (forward-compat)', async () => {
+    const future = {
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'high',
+      custom_safety: { mode: 'permissive', threshold: 0.8 },
+    };
+    msgQb.getOne.mockResolvedValue({ ...baseMessage, request_params: future });
+    const result = await service.getDetails('msg-1', 'u1');
+    expect(result.message.request_params).toEqual(future);
+  });
+
+  it('returns the captured recording when recorded=true', async () => {
+    msgQb.getOne.mockResolvedValue({ ...baseMessage, recorded: true });
+    recordingFindOne.mockResolvedValue({
+      message_id: 'msg-1',
+      request_body: { messages: [{ role: 'user', content: 'hi' }] },
+      response_body: { type: 'json', body: { choices: [] } },
+      response_headers: { 'content-type': 'application/json' },
+      size_bytes: 123,
+      created_at: '2026-02-16 10:00:00',
+    });
+
+    const result = await service.getDetails('msg-1', 'u1');
+
+    expect(result.message.recorded).toBe(true);
+    expect(result.recording).toEqual(
+      expect.objectContaining({
+        request_body: { messages: [{ role: 'user', content: 'hi' }] },
+        response_body: { type: 'json', body: { choices: [] } },
+        response_headers: { 'content-type': 'application/json' },
+        size_bytes: 123,
+      }),
+    );
+    expect(recordingFindOne).toHaveBeenCalledWith({ where: { message_id: 'msg-1' } });
+  });
+
+  it('does not look up a recording when recorded=false', async () => {
+    msgQb.getOne.mockResolvedValue({ ...baseMessage, recorded: false });
+    const result = await service.getDetails('msg-1', 'u1');
+    expect(result.recording).toBeNull();
+    expect(recordingFindOne).not.toHaveBeenCalled();
   });
 
   it('splits feedback_tags into an array when present', async () => {

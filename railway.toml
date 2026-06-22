@@ -1,9 +1,9 @@
 [build]
-buildCommand = "npm run build"
+buildCommand = "npx turbo build --filter=manifest-backend --filter=manifest-frontend --filter=manifest-shared"
 
 [deploy]
 startCommand = "npm start"
 healthcheckPath = "/api/v1/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

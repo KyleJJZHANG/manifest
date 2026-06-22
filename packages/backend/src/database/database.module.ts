@@ -13,14 +13,22 @@ import { AgentApiKey } from '../entities/agent-api-key.entity';
 import { NotificationRule } from '../entities/notification-rule.entity';
 import { NotificationLog } from '../entities/notification-log.entity';
 import { EmailProviderConfig } from '../entities/email-provider-config.entity';
-import { UserProvider } from '../entities/user-provider.entity';
+import { TenantProvider } from '../entities/tenant-provider.entity';
 import { TierAssignment } from '../entities/tier-assignment.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
 import { SpecificityAssignment } from '../entities/specificity-assignment.entity';
 import { HeaderTier } from '../entities/header-tier.entity';
 import { InstallMetadata } from '../entities/install-metadata.entity';
+import { BackfillState } from '../entities/backfill-state.entity';
+import { MessageRecording } from '../entities/message-recording.entity';
+import { AgentModelParams } from '../entities/agent-model-params.entity';
+import { PlaygroundRun } from '../entities/playground-run.entity';
+import { PlaygroundColumn } from '../entities/playground-column.entity';
+import { ReasoningContentCacheEntry } from '../entities/reasoning-content-cache-entry.entity';
+import { AgentEnabledProvider } from '../entities/agent-enabled-provider.entity';
 import { DatabaseSeederService } from './database-seeder.service';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
+import { shouldRetryDbConnection } from '../common/utils/db-retry';
 import { InitialSchema1771464895790 } from './migrations/1771464895790-InitialSchema';
 import { HashApiKeys1771500000000 } from './migrations/1771500000000-HashApiKeys';
 import { ModelPricingImprovements1771600000000 } from './migrations/1771600000000-ModelPricingImprovements';
@@ -76,6 +84,49 @@ import { AddHeaderTiers1776710000000 } from './migrations/1776710000000-AddHeade
 import { AddSpecificityMiscategorized1777000000000 } from './migrations/1777000000000-AddSpecificityMiscategorized';
 import { AddComplexityRoutingFlag1777100000000 } from './migrations/1777100000000-AddComplexityRoutingFlag';
 import { AddHeaderTierEnabled1777100000000 } from './migrations/1777100000000-AddHeaderTierEnabled';
+import { AddCustomProviderApiKind1777200000000 } from './migrations/1777200000000-AddCustomProviderApiKind';
+import { CanonicalizeTileProviderMessages1777200000000 } from './migrations/1777200000000-CanonicalizeTileProviderMessages';
+import { BackfillLocalAuthType1777200000000 } from './migrations/1777200000000-BackfillLocalAuthType';
+import { BackfillLocalCustomProviders1777300000000 } from './migrations/1777300000000-BackfillLocalCustomProviders';
+import { DropComplexityRoutingFlag1780000000000 } from './migrations/1780000000000-DropComplexityRoutingFlag';
+import { ReAddComplexityRoutingFlag1781000000000 } from './migrations/1781000000000-ReAddComplexityRoutingFlag';
+import { RetuneSpecificityMiscategorizedIndex1782000000000 } from './migrations/1782000000000-RetuneSpecificityMiscategorizedIndex';
+import { AddAgentSoftDelete1782200000000 } from './migrations/1782200000000-AddAgentSoftDelete';
+import { AddModelRouteColumns1783000000000 } from './migrations/1783000000000-AddModelRouteColumns';
+import { DropLegacyRoutingColumns1784000000000 } from './migrations/1784000000000-DropLegacyRoutingColumns';
+import { AddParamDefaultsColumns1785000000000 } from './migrations/1785000000000-AddParamDefaultsColumns';
+import { AddProviderKeyLabelAndPriority1785000000000 } from './migrations/1785000000000-AddProviderKeyLabelAndPriority';
+import { AddProviderKeyLabelToAgentMessages1785100000000 } from './migrations/1785100000000-AddProviderKeyLabelToAgentMessages';
+import { AddRequestParamsColumn1786000000000 } from './migrations/1786000000000-AddRequestParamsColumn';
+import { AddAgentRecordMessages1786100000000 } from './migrations/1786100000000-AddAgentRecordMessages';
+import { AddMessageRecordings1786200000000 } from './migrations/1786200000000-AddMessageRecordings';
+import { DefaultRecordMessagesTrue1786300000000 } from './migrations/1786300000000-DefaultRecordMessagesTrue';
+import { AddAgentModelParams1787000000000 } from './migrations/1787000000000-AddAgentModelParams';
+import { AddBenchmarkHistory1788000000000 } from './migrations/1788000000000-AddBenchmarkHistory';
+import { RenameBenchmarkToPlayground1789000000000 } from './migrations/1789000000000-RenameBenchmarkToPlayground';
+import { AddOAuthPendingFlows1789100000000 } from './migrations/1789100000000-AddOAuthPendingFlows';
+import { ScopeAgentModelParams1789200000000 } from './migrations/1789200000000-ScopeAgentModelParams';
+import { EnableRecordMessagesForAll1789300000000 } from './migrations/1789300000000-EnableRecordMessagesForAll';
+import { AddRoutingOutputControls1789300000000 } from './migrations/1789300000000-AddRoutingOutputControls';
+import { AddAgentApiKeyPrefixActiveIndex1790000000000 } from './migrations/1790000000000-AddAgentApiKeyPrefixActiveIndex';
+import { AddReasoningContentCache1790100000000 } from './migrations/1790100000000-AddReasoningContentCache';
+import { AddDedupCompositeIndex1790200000000 } from './migrations/1790200000000-AddDedupCompositeIndex';
+import { AddErrorsPartialIndex1790300000000 } from './migrations/1790300000000-AddErrorsPartialIndex';
+import { DropRedundantAgentApiKeyPrefixIndex1790400000000 } from './migrations/1790400000000-DropRedundantAgentApiKeyPrefixIndex';
+import { LiftProvidersToUserLevel1791000000000 } from './migrations/1791000000000-LiftProvidersToUserLevel';
+import { LiftCustomProvidersToUserLevel1791200000000 } from './migrations/1791200000000-LiftCustomProvidersToUserLevel';
+import { SeedPlaygroundAgents1791400000000 } from './migrations/1791400000000-SeedPlaygroundAgents';
+import { DropProviderRateLimits1791600000000 } from './migrations/1791600000000-DropProviderRateLimits';
+import { DropSavingsBaselineColumns1791700000000 } from './migrations/1791700000000-DropSavingsBaselineColumns';
+import { RenameProviderAccessToEnabledProviders1791800000000 } from './migrations/1791800000000-RenameProviderAccessToEnabledProviders';
+import { RenameIsSystemToIsPlayground1791900000000 } from './migrations/1791900000000-RenameIsSystemToIsPlayground';
+import { AddUserProviderIdToAgentMessages1792000000000 } from './migrations/1792000000000-AddUserProviderIdToAgentMessages';
+import { AddCustomProviderFkToUserProviders1792100000000 } from './migrations/1792100000000-AddCustomProviderFkToUserProviders';
+import { TenantOwnerColumn1792400000000 } from './migrations/1792400000000-TenantOwnerColumn';
+import { TenantProviders1792500000000 } from './migrations/1792500000000-TenantProviders';
+import { TenantScopedConfigs1792600000000 } from './migrations/1792600000000-TenantScopedConfigs';
+import { DropUserScopeFromRouting1792700000000 } from './migrations/1792700000000-DropUserScopeFromRouting';
+import { AddBackfillStateTable1792800000000 } from './migrations/1792800000000-AddBackfillStateTable';
 
 const entities = [
   AgentMessage,
@@ -89,12 +140,19 @@ const entities = [
   NotificationRule,
   NotificationLog,
   EmailProviderConfig,
-  UserProvider,
+  TenantProvider,
   TierAssignment,
   CustomProvider,
   SpecificityAssignment,
   HeaderTier,
   InstallMetadata,
+  MessageRecording,
+  AgentModelParams,
+  PlaygroundRun,
+  PlaygroundColumn,
+  ReasoningContentCacheEntry,
+  AgentEnabledProvider,
+  BackfillState,
 ];
 
 const migrations = [
@@ -153,6 +211,49 @@ const migrations = [
   AddSpecificityMiscategorized1777000000000,
   AddComplexityRoutingFlag1777100000000,
   AddHeaderTierEnabled1777100000000,
+  AddCustomProviderApiKind1777200000000,
+  CanonicalizeTileProviderMessages1777200000000,
+  BackfillLocalAuthType1777200000000,
+  BackfillLocalCustomProviders1777300000000,
+  DropComplexityRoutingFlag1780000000000,
+  ReAddComplexityRoutingFlag1781000000000,
+  RetuneSpecificityMiscategorizedIndex1782000000000,
+  AddAgentSoftDelete1782200000000,
+  AddModelRouteColumns1783000000000,
+  DropLegacyRoutingColumns1784000000000,
+  AddParamDefaultsColumns1785000000000,
+  AddProviderKeyLabelAndPriority1785000000000,
+  AddProviderKeyLabelToAgentMessages1785100000000,
+  AddRequestParamsColumn1786000000000,
+  AddAgentRecordMessages1786100000000,
+  AddMessageRecordings1786200000000,
+  DefaultRecordMessagesTrue1786300000000,
+  AddAgentModelParams1787000000000,
+  AddBenchmarkHistory1788000000000,
+  RenameBenchmarkToPlayground1789000000000,
+  AddOAuthPendingFlows1789100000000,
+  ScopeAgentModelParams1789200000000,
+  EnableRecordMessagesForAll1789300000000,
+  AddRoutingOutputControls1789300000000,
+  AddAgentApiKeyPrefixActiveIndex1790000000000,
+  AddReasoningContentCache1790100000000,
+  AddDedupCompositeIndex1790200000000,
+  AddErrorsPartialIndex1790300000000,
+  DropRedundantAgentApiKeyPrefixIndex1790400000000,
+  LiftProvidersToUserLevel1791000000000,
+  LiftCustomProvidersToUserLevel1791200000000,
+  SeedPlaygroundAgents1791400000000,
+  DropProviderRateLimits1791600000000,
+  DropSavingsBaselineColumns1791700000000,
+  RenameProviderAccessToEnabledProviders1791800000000,
+  RenameIsSystemToIsPlayground1791900000000,
+  AddUserProviderIdToAgentMessages1792000000000,
+  AddCustomProviderFkToUserProviders1792100000000,
+  TenantOwnerColumn1792400000000,
+  TenantProviders1792500000000,
+  TenantScopedConfigs1792600000000,
+  DropUserScopeFromRouting1792700000000,
+  AddBackfillStateTable1792800000000,
 ];
 
 @Module({
@@ -174,10 +275,25 @@ const migrations = [
         migrationsRun: true,
         migrationsTransactionMode: 'all' as const,
         migrations,
+        // A failed migration must not go through the connection-retry loop:
+        // @nestjs/typeorm checks toRetry before logging, so returning false
+        // here suppresses the misleading "Unable to connect to the database.
+        // Retrying" line and fails fast with the real migration error. Genuine
+        // connectivity failures (DB not ready yet) still retry.
+        toRetry: shouldRetryDbConnection,
         logging: false,
         extra: {
-          max: config.get<number>('app.dbPoolMax') ?? 20,
+          // app.config.ts always resolves dbPoolMax (default 20), so there is no
+          // undefined case to fall back from — keep that file the single source
+          // of truth for the pool size.
+          max: config.get<number>('app.dbPoolMax'),
           idleTimeoutMillis: 30000,
+          // statement_timeout / idle_in_transaction_session_timeout were tried
+          // here (#1745) and via the `options` connection string (#1749), but
+          // Railway's PgBouncer rejects both forms — its
+          // `ignore_startup_parameters` allowlist only includes
+          // `extra_float_digits`. If we need per-query timeouts later, set
+          // them with `SET LOCAL` inside the relevant transaction instead.
         },
       }),
     }),
@@ -187,11 +303,15 @@ const migrations = [
       AgentApiKey,
       AgentMessage,
       ApiKey,
-      UserProvider,
+      TenantProvider,
       TierAssignment,
       CustomProvider,
       SpecificityAssignment,
       HeaderTier,
+      MessageRecording,
+      AgentModelParams,
+      ReasoningContentCacheEntry,
+      AgentEnabledProvider,
     ]),
     ModelPricesModule,
   ],

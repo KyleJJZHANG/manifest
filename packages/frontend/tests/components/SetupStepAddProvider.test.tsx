@@ -20,13 +20,13 @@ describe("SetupStepAddProvider", () => {
 
   it("renders heading", () => {
     render(() => <SetupStepAddProvider {...defaultProps} />);
-    expect(screen.getByText("Connect your agent to Manifest")).toBeDefined();
+    expect(screen.getByText("Connect your harness to Manifest")).toBeDefined();
   });
 
   it("shows description with auto model", () => {
     const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
     expect(container.textContent).toContain("auto");
-    expect(container.textContent).toContain("Point your agent");
+    expect(container.textContent).toContain("Point your harness");
   });
 
   it("renders Agents and Toolkits segmented tabs", () => {
@@ -46,12 +46,48 @@ describe("SetupStepAddProvider", () => {
     expect(activeBtn!.textContent).toBe("Agents");
   });
 
-  it("shows OpenClaw and Hermes Agent tabs inside Agents", () => {
+  it("shows OpenClaw, Hermes, Nanobot, Craft, Claude Code, and OpenCode tabs inside Agents", () => {
     const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
     const agentTabs = container.querySelectorAll(".panel__tab");
-    expect(agentTabs).toHaveLength(2);
+    expect(agentTabs).toHaveLength(6);
     expect(agentTabs[0].textContent).toContain("OpenClaw");
     expect(agentTabs[1].textContent).toContain("Hermes Agent");
+    expect(agentTabs[2].textContent).toContain("Nanobot");
+    expect(agentTabs[3].textContent).toContain("Craft Agent");
+    expect(agentTabs[4].textContent).toContain("Claude Code");
+    expect(agentTabs[5].textContent).toContain("OpenCode");
+  });
+
+  it("shows Nanobot setup when Nanobot tab clicked", () => {
+    const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
+    const agentTabs = container.querySelectorAll(".panel__tab");
+    fireEvent.click(agentTabs[2]); // Nanobot
+    expect(container.textContent).toContain("~/.nanobot/config.json");
+    expect(container.textContent).toContain("apiBase");
+  });
+
+  it("shows Claude Code setup when Claude Code tab clicked", () => {
+    const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
+    const agentTabs = container.querySelectorAll(".panel__tab");
+    fireEvent.click(agentTabs[4]); // Claude Code
+    expect(container.textContent).toContain("ANTHROPIC_BASE_URL");
+    expect(container.textContent).toContain("ANTHROPIC_AUTH_TOKEN");
+  });
+
+  it("shows Craft setup when Craft Agent tab clicked", () => {
+    const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
+    const agentTabs = container.querySelectorAll(".panel__tab");
+    fireEvent.click(agentTabs[3]); // Craft Agent
+    expect(container.textContent).toContain("Manifest provider preset");
+    expect(container.textContent).toContain("mnfst_YOUR_KEY");
+  });
+
+  it("shows OpenCode setup when OpenCode tab clicked", () => {
+    const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
+    const agentTabs = container.querySelectorAll(".panel__tab");
+    fireEvent.click(agentTabs[5]); // OpenCode
+    expect(container.textContent).toContain("~/.config/opencode/opencode.json");
+    expect(container.textContent).toContain('"model": "manifest/auto"');
   });
 
   it("defaults to OpenClaw agent tab", () => {
@@ -64,7 +100,7 @@ describe("SetupStepAddProvider", () => {
     const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
     const icon = container.querySelector(".panel__tab-icon");
     expect(icon).not.toBeNull();
-    expect(icon!.getAttribute("src")).toBe("/icons/openclaw.png");
+    expect(icon!.getAttribute("src")).toBe("/icons/openclaw.svg");
   });
 
   it("shows Agents card when OpenClaw selected", () => {
@@ -136,7 +172,7 @@ describe("SetupStepAddProvider", () => {
     expect(fields[0].textContent).toContain("http://localhost:3001/v1");
     expect(fields[1].textContent).toContain("API Key");
     expect(fields[2].textContent).toContain("Endpoint compatibility");
-    expect(fields[2].textContent).toContain("OpenAI-compatible");
+    expect(fields[2].textContent).toContain("OpenAI Chat Completions-compatible");
     expect(fields[3].textContent).toContain("Model ID");
     expect(fields[3].textContent).toContain("auto");
     expect(fields[4].textContent).toContain("Endpoint ID");
@@ -188,8 +224,9 @@ describe("SetupStepAddProvider", () => {
     const { container } = render(() => <SetupStepAddProvider {...defaultProps} />);
     fireEvent.click(container.querySelectorAll(".setup-segment__btn")[1]);
     const tabs = container.querySelectorAll(".panel__tab");
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(5);
     expect(tabs[0].textContent).toContain("OpenAI SDK");
+    expect(tabs[1].textContent).toContain("Anthropic SDK");
   });
 
   it("shows full API key on Toolkits tab when provided", () => {
@@ -249,7 +286,7 @@ describe("SetupStepAddProvider", () => {
       render(() => (
         <SetupStepAddProvider {...defaultProps} platform="openclaw" />
       ));
-      expect(screen.getByText("Connect your OpenClaw agent to Manifest")).toBeDefined();
+      expect(screen.getByText("Connect your OpenClaw harness to Manifest")).toBeDefined();
     });
 
     it("shows HermesSetup directly when platform is hermes", () => {
@@ -264,7 +301,74 @@ describe("SetupStepAddProvider", () => {
       render(() => (
         <SetupStepAddProvider {...defaultProps} platform="hermes" />
       ));
-      expect(screen.getByText("Connect your Hermes agent to Manifest")).toBeDefined();
+      expect(screen.getByText("Connect your Hermes harness to Manifest")).toBeDefined();
+    });
+
+    it("shows NanobotSetup directly when platform is nanobot", () => {
+      const { container } = render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="nanobot" />
+      ));
+      expect(container.textContent).toContain("~/.nanobot/config.json");
+      expect(container.textContent).toContain("apiBase");
+      // No top-level Agents/Toolkits tabs in filtered mode.
+      expect(container.querySelector('[aria-label="Setup method"]')).toBeNull();
+    });
+
+    it("shows correct heading for nanobot", () => {
+      render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="nanobot" />
+      ));
+      expect(screen.getByText("Connect your Nanobot harness to Manifest")).toBeDefined();
+    });
+
+    it("shows CraftAgentSetup directly when platform is craft", () => {
+      const { container } = render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="craft" />
+      ));
+      expect(container.textContent).toContain("Manifest provider preset");
+      expect(container.textContent).toContain("mnfst_YOUR_KEY");
+      // No top-level Agents/Toolkits tabs in filtered mode.
+      expect(container.querySelector('[aria-label="Setup method"]')).toBeNull();
+    });
+
+    it("shows correct heading for craft", () => {
+      render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="craft" />
+      ));
+      expect(screen.getByText("Connect your Craft harness to Manifest")).toBeDefined();
+    });
+
+    it("shows ClaudeCodeSetup directly when platform is claude-code", () => {
+      const { container } = render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="claude-code" />
+      ));
+      expect(container.textContent).toContain("~/.claude/settings.json");
+      expect(container.textContent).toContain("ANTHROPIC_BASE_URL");
+      // No top-level Agents/Toolkits tabs in filtered mode.
+      expect(container.querySelector('[aria-label="Setup method"]')).toBeNull();
+    });
+
+    it("shows correct heading for claude-code", () => {
+      render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="claude-code" />
+      ));
+      expect(screen.getByText("Connect Claude Code to Manifest")).toBeDefined();
+    });
+
+    it("shows OpenCodeSetup directly when platform is opencode", () => {
+      const { container } = render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="opencode" />
+      ));
+      expect(container.textContent).toContain("~/.config/opencode/opencode.json");
+      expect(container.textContent).toContain('"model": "manifest/auto"');
+      expect(container.querySelector('[aria-label="Setup method"]')).toBeNull();
+    });
+
+    it("shows correct heading for opencode", () => {
+      render(() => (
+        <SetupStepAddProvider {...defaultProps} platform="opencode" />
+      ));
+      expect(screen.getByText("Connect OpenCode to Manifest")).toBeDefined();
     });
 
     it("shows OpenAI SDK snippet when platform is openai-sdk", () => {
@@ -275,6 +379,8 @@ describe("SetupStepAddProvider", () => {
       expect(container.querySelector('[aria-label="Setup method"]')).toBeNull();
       // Should show OpenAI-specific code
       expect(container.textContent).toContain("OpenAI");
+      expect(container.textContent).toContain("client.responses.create");
+      expect(container.textContent).not.toContain("chat.completions.create");
     });
 
     it("shows Vercel AI SDK snippet when platform is vercel-ai-sdk", () => {
@@ -333,14 +439,14 @@ describe("SetupStepAddProvider", () => {
       const { container } = render(() => (
         <SetupStepAddProvider {...defaultProps} platform="openclaw" />
       ));
-      expect(container.textContent).toContain("Connect your OpenClaw agent to Manifest");
+      expect(container.textContent).toContain("Connect your OpenClaw harness to Manifest");
     });
 
     it("does not show description text in filtered mode", () => {
       const { container } = render(() => (
         <SetupStepAddProvider {...defaultProps} platform="openclaw" />
       ));
-      expect(container.textContent).not.toContain("Point your agent at the Manifest endpoint");
+      expect(container.textContent).not.toContain("Point your harness at the Manifest endpoint");
     });
   });
 });

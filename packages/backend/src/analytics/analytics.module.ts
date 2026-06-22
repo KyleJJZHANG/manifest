@@ -7,8 +7,16 @@ import { LlmCall } from '../entities/llm-call.entity';
 import { ToolExecution } from '../entities/tool-execution.entity';
 import { AgentLog } from '../entities/agent-log.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
+import { TenantProvider } from '../entities/tenant-provider.entity';
+import { AgentEnabledProvider } from '../entities/agent-enabled-provider.entity';
+import { TierAssignment } from '../entities/tier-assignment.entity';
+import { SpecificityAssignment } from '../entities/specificity-assignment.entity';
+import { HeaderTier } from '../entities/header-tier.entity';
+import { MessageRecording } from '../entities/message-recording.entity';
+import { AgentModelParams } from '../entities/agent-model-params.entity';
 import { OtlpModule } from '../otlp/otlp.module';
 import { RoutingCoreModule } from '../routing/routing-core/routing-core.module';
+import { ModelPricesModule } from '../model-prices/model-prices.module';
 import { AggregationService } from './services/aggregation.service';
 import { AgentDuplicationService } from './services/agent-duplication.service';
 import { AgentLifecycleService } from './services/agent-lifecycle.service';
@@ -16,16 +24,20 @@ import { TimeseriesQueriesService } from './services/timeseries-queries.service'
 import { MessagesQueryService } from './services/messages-query.service';
 import { MessageDetailsService } from './services/message-details.service';
 import { MessageFeedbackService } from './services/message-feedback.service';
+import { MessageRecordingService } from './services/message-recording.service';
 import { SpecificityFeedbackService } from './services/specificity-feedback.service';
 import { AgentAnalyticsService } from './services/agent-analytics.service';
 import { ReconciliationService } from './services/reconciliation.service';
+import { ProviderUsageService } from './services/provider-usage.service';
 import { OverviewController } from './controllers/overview.controller';
+import { ProviderUsageController } from './controllers/provider-usage.controller';
 import { TokensController } from './controllers/tokens.controller';
 import { CostsController } from './controllers/costs.controller';
 import { MessagesController } from './controllers/messages.controller';
 import { AgentsController } from './controllers/agents.controller';
 import { AgentAnalyticsController } from './controllers/agent-analytics.controller';
 import { ReconciliationController } from './controllers/reconciliation.controller';
+import { ProviderAnalyticsController } from './controllers/provider-analytics.controller';
 
 @Module({
   imports: [
@@ -37,9 +49,17 @@ import { ReconciliationController } from './controllers/reconciliation.controlle
       ToolExecution,
       AgentLog,
       CustomProvider,
+      TenantProvider,
+      AgentEnabledProvider,
+      TierAssignment,
+      SpecificityAssignment,
+      HeaderTier,
+      MessageRecording,
+      AgentModelParams,
     ]),
     OtlpModule,
     RoutingCoreModule,
+    ModelPricesModule,
   ],
   controllers: [
     OverviewController,
@@ -49,6 +69,8 @@ import { ReconciliationController } from './controllers/reconciliation.controlle
     AgentsController,
     AgentAnalyticsController,
     ReconciliationController,
+    ProviderAnalyticsController,
+    ProviderUsageController,
   ],
   providers: [
     AggregationService,
@@ -58,10 +80,12 @@ import { ReconciliationController } from './controllers/reconciliation.controlle
     MessagesQueryService,
     MessageDetailsService,
     MessageFeedbackService,
+    MessageRecordingService,
     SpecificityFeedbackService,
     AgentAnalyticsService,
     ReconciliationService,
+    ProviderUsageService,
   ],
-  exports: [SpecificityFeedbackService],
+  exports: [SpecificityFeedbackService, MessageRecordingService, ProviderUsageService],
 })
 export class AnalyticsModule {}

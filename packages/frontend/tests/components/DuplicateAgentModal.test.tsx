@@ -34,13 +34,25 @@ describe('DuplicateAgentModal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetDuplicatePreview.mockResolvedValue({
-      copied: { providers: 3, customProviders: 1, tierAssignments: 4, specificityAssignments: 2 },
+      copied: {
+        providers: 3,
+        customProviders: 1,
+        tierAssignments: 4,
+        specificityAssignments: 2,
+        modelParams: 0,
+      },
       suggested_name: 'my-agent-copy',
     });
     mockDuplicateAgent.mockResolvedValue({
       agent: { id: 'new-id', name: 'my-agent-copy', display_name: 'my-agent-copy' },
       apiKey: 'mnfst_xyz',
-      copied: { providers: 3, customProviders: 1, tierAssignments: 4, specificityAssignments: 2 },
+      copied: {
+        providers: 3,
+        customProviders: 1,
+        tierAssignments: 4,
+        specificityAssignments: 2,
+        modelParams: 0,
+      },
     });
   });
 
@@ -64,21 +76,33 @@ describe('DuplicateAgentModal', () => {
     });
   });
 
-  it('shows counts in the details disclosure', async () => {
+  it('shows copied and not-copied sections without an accordion', async () => {
     render(() => (
       <DuplicateAgentModal open={true} sourceName="my-agent" onClose={vi.fn()} />
     ));
 
     await waitFor(() => {
-      const list = qa('.duplicate-agent__list li');
-      expect(list.length).toBeGreaterThan(0);
+      const allItems = qa('.duplicate-agent__list li');
+      // Wait for the copied section to render (more than just the 3 "not copied" items)
+      expect(allItems.length).toBeGreaterThan(3);
     });
 
+    // "What is copied" items
     const list = qa('.duplicate-agent__list li').map((li) => li.textContent);
     expect(list.some((t) => t?.includes('3') && t?.includes('provider credential'))).toBe(true);
-    expect(list.some((t) => t?.includes('1') && t?.includes('custom provider'))).toBe(true);
     expect(list.some((t) => t?.includes('4') && t?.includes('tier override'))).toBe(true);
     expect(list.some((t) => t?.includes('2') && t?.includes('specificity override'))).toBe(true);
+
+    // "What is not copied" items are always visible (no accordion)
+    const headers = qa('.duplicate-agent__section-header').map((h) => h.textContent?.trim());
+    expect(headers.some((h) => h?.includes("What is copied"))).toBe(true);
+    expect(headers.some((h) => h?.includes("What is not copied"))).toBe(true);
+    expect(list.some((t) => t === 'Messages')).toBe(true);
+    expect(list.some((t) => t === 'Logs')).toBe(true);
+    expect(list.some((t) => t === 'Notification rules')).toBe(true);
+
+    // No <details> elements — content is always visible
+    expect(document.querySelector('details')).toBeNull();
   });
 
   it('calls duplicateAgent, shows toast, and navigates on success', async () => {
@@ -93,7 +117,7 @@ describe('DuplicateAgentModal', () => {
     });
 
     const btn = Array.from(document.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Duplicate agent',
+      (b) => b.textContent?.trim() === 'Duplicate harness',
     ) as HTMLButtonElement;
     fireEvent.click(btn);
 
@@ -103,7 +127,7 @@ describe('DuplicateAgentModal', () => {
     await waitFor(() => {
       expect(mockToastSuccess).toHaveBeenCalled();
       expect(mockMarkAgentCreated).toHaveBeenCalledWith('my-agent-copy');
-      expect(mockNavigate).toHaveBeenCalledWith('/agents/my-agent-copy', {
+      expect(mockNavigate).toHaveBeenCalledWith('/harnesses/my-agent-copy', {
         state: { newApiKey: 'mnfst_xyz' },
       });
       expect(onClose).toHaveBeenCalled();
@@ -112,7 +136,7 @@ describe('DuplicateAgentModal', () => {
 
   it('disables the Duplicate button when name is empty', async () => {
     mockGetDuplicatePreview.mockResolvedValueOnce({
-      copied: { providers: 0, customProviders: 0, tierAssignments: 0, specificityAssignments: 0 },
+      copied: { providers: 0, customProviders: 0, tierAssignments: 0, specificityAssignments: 0, modelParams: 0 },
       suggested_name: '',
     });
     render(() => (
@@ -121,7 +145,7 @@ describe('DuplicateAgentModal', () => {
 
     await waitFor(() => {
       const btn = Array.from(document.querySelectorAll('button')).find(
-        (b) => b.textContent?.trim() === 'Duplicate agent',
+        (b) => b.textContent?.trim() === 'Duplicate harness',
       ) as HTMLButtonElement;
       expect(btn.hasAttribute('disabled')).toBe(true);
     });
@@ -185,7 +209,7 @@ describe('DuplicateAgentModal', () => {
     });
 
     const btn = Array.from(document.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Duplicate agent',
+      (b) => b.textContent?.trim() === 'Duplicate harness',
     ) as HTMLButtonElement;
     fireEvent.click(btn);
 
@@ -233,6 +257,7 @@ describe('DuplicateAgentModal', () => {
         customProviders: number;
         tierAssignments: number;
         specificityAssignments: number;
+        modelParams: number;
       };
     }) => void = () => undefined;
     mockDuplicateAgent.mockImplementation(
@@ -261,7 +286,7 @@ describe('DuplicateAgentModal', () => {
     });
 
     const duplicateBtn = Array.from(document.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Duplicate agent',
+      (b) => b.textContent?.trim() === 'Duplicate harness',
     ) as HTMLButtonElement;
     fireEvent.click(duplicateBtn);
 
@@ -281,7 +306,7 @@ describe('DuplicateAgentModal', () => {
     resolveDuplicate({
       agent: { id: 'new-id', name: 'my-agent-copy', display_name: 'my-agent-copy' },
       apiKey: 'mnfst_xyz',
-      copied: { providers: 0, customProviders: 0, tierAssignments: 0, specificityAssignments: 0 },
+      copied: { providers: 0, customProviders: 0, tierAssignments: 0, specificityAssignments: 0, modelParams: 0 },
     });
 
     await waitFor(() => {

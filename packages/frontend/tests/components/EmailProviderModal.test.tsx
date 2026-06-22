@@ -618,7 +618,7 @@ describe("EmailProviderModal", () => {
     fireEvent.click(testBtn);
     await vi.waitFor(() => {
       expect((toast.error as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
-        "Email test failed — check your credentials",
+        "Email test failed. Check your credentials",
       );
     });
   });
@@ -696,5 +696,33 @@ describe("EmailProviderModal", () => {
         "Enter a notification email to send the test to",
       );
     });
+  });
+
+  it("submits when Enter is pressed on an input", async () => {
+    render(() => <EmailProviderModal {...defaultProps} />);
+    const apiKeyInput = q("#email-provider-api-key") as HTMLInputElement;
+    fireEvent.input(apiKeyInput, { target: { value: "re_validkey1234" } });
+    fireEvent.keyDown(apiKeyInput, { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(mockTestEmailProvider).toHaveBeenCalled();
+    });
+  });
+
+  it("closes when Escape is pressed on an input", () => {
+    const onClose = vi.fn();
+    render(() => <EmailProviderModal {...defaultProps} onClose={onClose} />);
+    const apiKeyInput = q("#email-provider-api-key") as HTMLInputElement;
+    fireEvent.keyDown(apiKeyInput, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("does not call handleSave when Enter is pressed on a button", () => {
+    render(() => <EmailProviderModal {...defaultProps} />);
+    const apiKeyInput = q("#email-provider-api-key") as HTMLInputElement;
+    fireEvent.input(apiKeyInput, { target: { value: "re_validkey1234" } });
+    // Simulate Enter on the "Send test email" button — should NOT trigger handleSave
+    const testBtn = q(".btn--ghost") as HTMLButtonElement;
+    fireEvent.keyDown(testBtn, { key: "Enter" });
+    expect(mockTestEmailProvider).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,9 @@
 import { fetchJson, fetchMutate } from './core.js';
 
-export function getAgents() {
-  return fetchJson('/agents');
+export function getAgents(includePlayground = false) {
+  // includePlayground surfaces the reserved Playground (is_playground) agent — the
+  // Messages filter opts in so the log can be filtered to Playground runs.
+  return fetchJson(includePlayground ? '/agents?includePlayground=true' : '/agents');
 }
 
 export interface AgentInfo {
@@ -9,11 +11,15 @@ export interface AgentInfo {
   display_name: string;
   agent_category: string | null;
   agent_platform: string | null;
+  record_messages?: boolean;
 }
 
 export function getAgentInfo(agentName: string): Promise<AgentInfo | null> {
-  return fetchJson<{ agents: AgentInfo[] }>('/agents').then(
-    (data) => data?.agents?.find((a) => a.agent_name === agentName) ?? null,
+  // Backend returns { agent: null } for missing agents (200), so we don't need
+  // to swallow errors here. Network/server failures should propagate to the
+  // caller rather than masquerade as "agent not found".
+  return fetchJson<{ agent: AgentInfo | null }>(`/agents/${encodeURIComponent(agentName)}`).then(
+    (data) => data?.agent ?? null,
   );
 }
 
@@ -35,6 +41,7 @@ export function updateAgent(
     name?: string;
     agent_category?: string;
     agent_platform?: string;
+    record_messages?: boolean;
   },
 ) {
   return fetchMutate<Record<string, unknown>>(`/agents/${encodeURIComponent(currentName)}`, {
@@ -61,9 +68,9 @@ export interface CreateAgentParams {
 export interface DuplicateAgentPreview {
   copied: {
     providers: number;
-    customProviders: number;
     tierAssignments: number;
     specificityAssignments: number;
+    modelParams: number;
   };
   suggested_name: string;
 }

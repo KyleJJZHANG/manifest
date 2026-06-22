@@ -61,20 +61,19 @@ describe("Limits page", () => {
     mockRoutingStatus = { enabled: false };
   });
 
-  it("renders page title", () => {
-    render(() => <Limits />);
-    expect(screen.getByText("Limits")).toBeDefined();
+  it("does not render a duplicate page heading", () => {
+    const { container } = render(() => <Limits />);
+    expect(container.querySelector("h1")).toBeNull();
   });
 
-  it("renders breadcrumb with agent name", () => {
+  it("renders page description without duplicating the agent heading", () => {
     const { container } = render(() => <Limits />);
-    expect(container.textContent).toContain("test-agent");
     expect(container.textContent).toContain("Get notified or block requests when token or cost thresholds are exceeded");
   });
 
   it("renders Create rule button", () => {
     render(() => <Limits />);
-    expect(screen.getByText("+ Create rule")).toBeDefined();
+    expect(screen.getByText("Create rule")).toBeDefined();
   });
 
   it("renders empty state when no rules", async () => {
@@ -107,22 +106,24 @@ describe("Limits page", () => {
     });
   });
 
-  it("shows routing CTA banner when routing disabled", async () => {
+  it("shows Connect-provider CTA banner when no provider is active", async () => {
     mockRoutingStatus = { enabled: false };
 
     const { container } = render(() => <Limits />);
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain("Enable routing to set hard limits");
+      expect(container.textContent).toContain("Connect a provider to set hard limits");
+      expect(container.textContent).not.toContain("Enable routing to set hard limits");
     });
   });
 
-  it("hides routing CTA banner when routing enabled", async () => {
+  it("hides the CTA banner when a provider is already active", async () => {
     mockRoutingStatus = { enabled: true };
 
     const { container } = render(() => <Limits />);
 
     await vi.waitFor(() => {
+      expect(container.textContent).not.toContain("Connect a provider to set hard limits");
       expect(container.textContent).not.toContain("Enable routing to set hard limits");
     });
   });
@@ -515,7 +516,7 @@ describe("Limits page", () => {
     render(() => <Limits />);
 
     // Open the create rule modal
-    fireEvent.click(screen.getByText("+ Create rule"));
+    fireEvent.click(screen.getByText("Create rule"));
     await vi.waitFor(() => {
       const modal = screen.getByTestId("limit-modal");
       expect(modal.getAttribute("data-open")).toBe("true");

@@ -1,31 +1,31 @@
 import { onMount, onCleanup, createEffect, on } from 'solid-js';
 import type { Accessor } from 'solid-js';
 import uPlot from 'uplot';
-import { getHslA } from './theme.js';
-
-export function makeGradientFill(topColor: string, bottomColor: string): uPlot.Series.Fill {
-  return ((u: uPlot) => {
-    if (!isFinite(u.bbox.top) || !isFinite(u.bbox.height) || u.bbox.height === 0) return topColor;
-    const grad = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-    grad.addColorStop(0, topColor);
-    grad.addColorStop(1, bottomColor);
-    return grad;
-  }) as uPlot.Series.Fill;
-}
-
-export function makeGradientFillFromVar(cssVar: string, alpha: number): uPlot.Series.Fill {
-  return makeGradientFill(getHslA(cssVar, alpha), 'transparent');
-}
 
 interface UseChartLifecycleOptions<T> {
   el: () => HTMLDivElement;
   data: Accessor<T[] | undefined>;
   buildChart: () => uPlot | null;
+  /**
+   * Optional builder for the chart's aligned data. When provided, a data change
+   * that does not alter the chart structure (see `structureKey`) updates the
+   * existing uPlot instance in place via `setData` instead of destroying and
+   * recreating it — far cheaper on every refetch/range-unchanged update.
+   */
+  buildData?: () => uPlot.AlignedData;
+  /**
+   * Identifies the chart's structural configuration (e.g. the selected range,
+   * which drives axes/scales). When it changes between data updates the chart
+   * is rebuilt; when it stays the same `setData` is used. Defaults to a constant
+   * so charts without structural variation always reuse the instance.
+   */
+  structureKey?: () => unknown;
 }
 
 export function useChartLifecycle<T>(opts: UseChartLifecycleOptions<T>): void {
   let chart: uPlot | null = null;
   let ro: ResizeObserver | null = null;
+  let lastStructureKey: unknown = opts.structureKey?.();
 
   const CHART_HEIGHT = 260;
 
@@ -57,6 +57,14 @@ export function useChartLifecycle<T>(opts: UseChartLifecycleOptions<T>): void {
     on(
       opts.data,
       () => {
+        const key = opts.structureKey?.();
+        const sameStructure = key === lastStructureKey;
+        lastStructureKey = key;
+
+        if (chart && opts.buildData && sameStructure) {
+          chart.setData(opts.buildData());
+          return;
+        }
         if (chart) {
           chart.destroy();
           chart = null;
@@ -74,35 +82,7 @@ export function useChartLifecycle<T>(opts: UseChartLifecycleOptions<T>): void {
   });
 }
 
-export function createCursorSnap(bgColor: string, pointColor: string): uPlot.Cursor {
-  return {
-    show: true,
-    x: true,
-    y: false,
-    drag: { x: false, y: false },
-    points: { show: true, size: 8, fill: pointColor, stroke: bgColor, width: 2 },
-    move: (u: uPlot, left: number, top: number) => {
-      const idx = u.posToIdx(left);
-      const snappedLeft =
-        idx != null && u.data[0]?.[idx] != null
-          ? Math.round(u.valToPos(u.data[0][idx]!, 'x'))
-          : left;
-      return [snappedLeft, top];
-    },
-  };
-}
-
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-export function formatLegendTimestamp(_u: uPlot, epochSec: number): string {
-  if (epochSec == null || isNaN(epochSec)) return '';
-  const d = new Date(epochSec * 1000);
-  const mon = MONTHS[d.getMonth()]!;
-  const day = d.getDate();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${mon} ${day}, ${hh}:${mm}`;
-}
 
 export function createFormatLegendTimestamp(
   range?: string,
@@ -118,12 +98,6 @@ export function createFormatLegendTimestamp(
     const mm = String(d.getMinutes()).padStart(2, '0');
     return `${mon} ${day}, ${hh}:${mm}`;
   };
-}
-
-export function formatLegendCost(_u: uPlot, val: number): string {
-  if (val == null || isNaN(val)) return '';
-  if (val > 0 && val < 0.01) return '< $0.01';
-  return `$${val.toFixed(2)}`;
 }
 
 export function formatLegendTokens(_u: uPlot, val: number): string {
@@ -155,6 +129,11 @@ const RANGE_HOURS: Record<string, number> = { '24h': 24 };
 
 export function rangeToSeconds(range: string): number {
   return RANGE_MAP[range] ?? 86400;
+}
+
+/** Slot width in seconds. Daily for 7d/30d, hourly otherwise. */
+export function binWidthSeconds(range: string | undefined): number {
+  return MULTI_DAY_RANGES.has(range ?? '') ? 86400 : 3600;
 }
 
 /**
@@ -314,41 +293,28 @@ export function parseTimestamps(
 
 const MIN_SPAN = 6 * 3600; // 6 hours in seconds
 
-export function timeScaleRange(_u: uPlot, min: number, max: number): [number, number] {
-  const now = Date.now() / 1000;
-  const clampedMax = Math.min(max, now);
-  const span = clampedMax - min;
-  if (span < MIN_SPAN) {
-    return [clampedMax - MIN_SPAN, clampedMax];
-  }
-  return [min, clampedMax];
-}
-
 export function createTimeScaleRange(
   range?: string,
+  bars: boolean = false,
 ): (_u: uPlot, min: number, max: number) => [number, number] {
   const multiDay = MULTI_DAY_RANGES.has(range ?? '');
   const intraday = INTRADAY_RANGES.has(range ?? '');
   const rangeSec = range ? rangeToSeconds(range) : 0;
+  // Bars are slot-centered; pad half a slot so the last bar fits.
+  const halfBin = bars ? binWidthSeconds(range) / 2 : 0;
   return (_u: uPlot, min: number, max: number): [number, number] => {
     const now = Date.now() / 1000;
     if (multiDay) {
-      // Use exact data extent — no padding — so first/last points
-      // sit at chart edges and every day is equally spaced.
-      return [min, max];
+      return [min - halfBin, max + halfBin];
     }
     if (intraday) {
-      return [now - rangeSec, now];
+      return [now - rangeSec - halfBin, now + halfBin];
     }
     const clampedMax = Math.min(max, now);
     const span = clampedMax - min;
     if (span < MIN_SPAN) {
-      return [clampedMax - MIN_SPAN, clampedMax];
+      return [clampedMax - MIN_SPAN - halfBin, clampedMax + halfBin];
     }
-    return [min, clampedMax];
+    return [min - halfBin, clampedMax + halfBin];
   };
-}
-
-export function sanitizeNumbers(values: number[]): (number | null)[] {
-  return values.map((v) => (Number.isFinite(v) ? v : null));
 }

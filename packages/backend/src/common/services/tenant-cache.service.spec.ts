@@ -6,136 +6,121 @@ import { Tenant } from '../../entities/tenant.entity';
 describe('TenantCacheService', () => {
   let service: TenantCacheService;
   let mockFindOne: jest.Mock;
+  let mockInsert: jest.Mock;
 
   beforeEach(async () => {
     mockFindOne = jest.fn();
-
+    mockInsert = jest.fn().mockResolvedValue({});
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TenantCacheService,
         {
           provide: getRepositoryToken(Tenant),
-          useValue: { findOne: mockFindOne },
+          useValue: { findOne: mockFindOne, insert: mockInsert },
         },
       ],
     }).compile();
-
     service = module.get<TenantCacheService>(TenantCacheService);
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
+  it('returns tenantId when the tenant exists', async () => {
+    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc', owner_user_id: 'user-1' });
+    expect(await service.resolve('user-1')).toBe('tenant-abc');
+    expect(mockFindOne).toHaveBeenCalledWith({ where: { owner_user_id: 'user-1' } });
   });
 
-  it('returns tenantId when tenant exists in DB', async () => {
-    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc', name: 'user-1' });
-
-    const result = await service.resolve('user-1');
-
-    expect(result).toBe('tenant-abc');
-    expect(mockFindOne).toHaveBeenCalledWith({ where: { name: 'user-1' } });
-  });
-
-  it('returns null when tenant not found', async () => {
+  it('returns null when the tenant is missing', async () => {
     mockFindOne.mockResolvedValueOnce(null);
-
-    const result = await service.resolve('unknown-user');
-
-    expect(result).toBeNull();
+    expect(await service.resolve('unknown')).toBeNull();
   });
 
-  it('returns cached value on second call without hitting DB again', async () => {
-    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc', name: 'user-1' });
-
-    const first = await service.resolve('user-1');
-    const second = await service.resolve('user-1');
-
-    expect(first).toBe('tenant-abc');
-    expect(second).toBe('tenant-abc');
+  it('caches subsequent lookups for the same user', async () => {
+    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc' });
+    await service.resolve('user-1');
+    await service.resolve('user-1');
     expect(mockFindOne).toHaveBeenCalledTimes(1);
   });
 
-  it('deletes expired cache entry on miss', async () => {
-    jest.useFakeTimers();
-    mockFindOne
-      .mockResolvedValueOnce({ id: 'tenant-abc', name: 'user-1' })
-      .mockResolvedValueOnce({ id: 'tenant-abc-v2', name: 'user-1' });
+  it('does NOT cache a missing tenant — re-queries until one exists (first-run 404 regression)', async () => {
+    // First resolve: the user has no tenant yet (e.g. the create-agent guard
+    // runs before its handler creates the tenant).
+    mockFindOne.mockResolvedValueOnce(null);
+    expect(await service.resolve('user-1')).toBeNull();
 
-    await service.resolve('user-1');
-    const cache = (service as any).cache as Map<string, unknown>;
-    expect(cache.has('user-1')).toBe(true);
+    // The tenant is created between the two calls.
+    mockFindOne.mockResolvedValueOnce({ id: 'tenant-created' });
+    expect(await service.resolve('user-1')).toBe('tenant-created');
 
-    jest.advanceTimersByTime(300_001);
-    await service.resolve('user-1');
-
-    // Stale entry was deleted and replaced with fresh one
-    expect(cache.has('user-1')).toBe(true);
+    // The null was never cached, so the second call had to re-hit the DB —
+    // otherwise the freshly created tenant would stay invisible for the TTL and
+    // provider/routing endpoints would 404 "Tenant not found".
     expect(mockFindOne).toHaveBeenCalledTimes(2);
   });
 
-  it('does not evict when updating an existing key at capacity', async () => {
-    jest.useFakeTimers();
-    const cache = (service as any).cache as Map<string, unknown>;
-    for (let i = 0; i < 5000; i++) {
-      cache.set(`u-${i}`, { tenantId: `t-${i}`, expiresAt: Date.now() + 300_000 });
-    }
-
-    // Expire u-0's entry and re-resolve — should update in place, not evict another entry
-    jest.advanceTimersByTime(300_001);
-    mockFindOne.mockResolvedValueOnce({ id: 't-0-new', name: 'u-0' });
-    await service.resolve('u-0');
-
-    // u-0 was expired+deleted then re-added, so size should still be 5000
-    // and u-1 should still be present (not evicted)
-    expect(cache.size).toBe(5000);
-    expect(cache.has('u-1')).toBe(true);
-  });
-
-  it('cache expires after TTL (300_000ms)', async () => {
-    jest.useFakeTimers();
-    mockFindOne
-      .mockResolvedValueOnce({ id: 'tenant-abc', name: 'user-1' })
-      .mockResolvedValueOnce({ id: 'tenant-abc-v2', name: 'user-1' });
-
+  it('invalidate() forces the next resolve() to re-hit the DB', async () => {
+    // First resolve populates the cache.
+    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc' });
     await service.resolve('user-1');
     expect(mockFindOne).toHaveBeenCalledTimes(1);
 
-    // Advance past TTL
-    jest.advanceTimersByTime(300_001);
+    // Invalidate clears the cached entry.
+    service.invalidate('user-1');
 
+    // Next resolve must re-query.
+    mockFindOne.mockResolvedValueOnce({ id: 'tenant-abc-refreshed' });
     const result = await service.resolve('user-1');
-    expect(result).toBe('tenant-abc-v2');
     expect(mockFindOne).toHaveBeenCalledTimes(2);
+    expect(result).toBe('tenant-abc-refreshed');
   });
 
-  it('evicts oldest entry when cache reaches MAX_ENTRIES (5000)', async () => {
-    // Fill the cache with 5000 entries
-    for (let i = 0; i < 5000; i++) {
-      mockFindOne.mockResolvedValueOnce({ id: `t-${i}`, name: `u-${i}` });
-      await service.resolve(`u-${i}`);
-    }
-    expect(mockFindOne).toHaveBeenCalledTimes(5000);
-
-    // The 5001st entry should trigger eviction of the oldest (u-0)
-    mockFindOne.mockResolvedValueOnce({ id: 't-5000', name: 'u-5000' });
-    const result = await service.resolve('u-5000');
-    expect(result).toBe('t-5000');
-
-    // u-0 was evicted, so resolving it should hit the DB again
-    mockFindOne.mockResolvedValueOnce({ id: 't-0-new', name: 'u-0' });
-    const evictedResult = await service.resolve('u-0');
-    expect(evictedResult).toBe('t-0-new');
+  it('invalidate() on an unknown user is a no-op (does not throw)', () => {
+    expect(() => service.invalidate('no-such-user')).not.toThrow();
   });
 
-  it('handles undefined from iterator when cache is empty during eviction check', async () => {
-    // This edge case is covered by the normal code path:
-    // when cache.size < MAX_ENTRIES, the eviction block is skipped.
-    // The undefined check inside the block is a defensive guard.
-    // We test it indirectly — when tenant is found and cache is not full,
-    // the code still works correctly.
-    mockFindOne.mockResolvedValueOnce({ id: 'tenant-1', name: 'user-1' });
+  describe('ensureForUser', () => {
+    it('returns the existing tenant id without inserting when one exists', async () => {
+      mockFindOne.mockResolvedValueOnce({ id: 'tenant-existing' });
+      const result = await service.ensureForUser('user-1');
+      expect(result).toBe('tenant-existing');
+      expect(mockInsert).not.toHaveBeenCalled();
+    });
 
-    const result = await service.resolve('user-1');
-    expect(result).toBe('tenant-1');
+    it('inserts a new tenant keyed by owner_user_id when none exists', async () => {
+      mockFindOne.mockResolvedValueOnce(null);
+      const result = await service.ensureForUser('user-2');
+      expect(mockInsert).toHaveBeenCalledTimes(1);
+      const inserted = mockInsert.mock.calls[0][0];
+      expect(inserted).toEqual(
+        expect.objectContaining({
+          id: result,
+          name: 'user-2',
+          owner_user_id: 'user-2',
+          is_active: true,
+        }),
+      );
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(0);
+    });
+
+    it('re-finds by owner_user_id when the insert races and loses', async () => {
+      // resolve() finds nothing → attempt insert → insert throws (unique
+      // index on owner_user_id) → re-find returns the surviving row.
+      mockFindOne.mockResolvedValueOnce(null);
+      mockInsert.mockRejectedValueOnce(new Error('duplicate key value'));
+      mockFindOne.mockResolvedValueOnce({ id: 'tenant-raced' });
+
+      const result = await service.ensureForUser('user-3');
+      expect(result).toBe('tenant-raced');
+      // Second findOne is the post-race re-find, scoped by owner_user_id.
+      expect(mockFindOne).toHaveBeenLastCalledWith({ where: { owner_user_id: 'user-3' } });
+    });
+
+    it('rethrows the original insert error when the re-find finds nothing (not a race)', async () => {
+      mockFindOne.mockResolvedValueOnce(null);
+      mockInsert.mockRejectedValueOnce(new Error('connection terminated'));
+      mockFindOne.mockResolvedValueOnce(null);
+
+      await expect(service.ensureForUser('user-4')).rejects.toThrow('connection terminated');
+    });
   });
 });

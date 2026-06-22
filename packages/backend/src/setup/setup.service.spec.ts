@@ -61,6 +61,12 @@ describe('SetupService', () => {
       expect(service.getLocalLlmHost()).toBe('host.docker.internal');
     });
 
+    it("returns 'host.containers.internal' under Podman (/run/.containerenv only)", () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').existsSync = (p: string) => p === '/run/.containerenv';
+      expect(service.getLocalLlmHost()).toBe('host.containers.internal');
+    });
+
     it("returns 'localhost' when /.dockerenv is absent", () => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       require('fs').existsSync = () => false;
@@ -377,6 +383,35 @@ describe('SetupService', () => {
 
         await expect(service.createFirstAdmin(dto)).rejects.toThrow(ConflictException);
         expect(auth.api.signUpEmail).not.toHaveBeenCalled();
+      });
+
+      it('throws ConflictException when count=1 but unverified SELECT returns 2+ rows', async () => {
+        // Defensive: count check says one user, but the unverified+email
+        // SELECT returns multiple rows (e.g., race with another insert or
+        // schema corruption). The recovery branch only fires when
+        // unverified.length === 1, so this MUST fall through to 409 —
+        // never silently mark all matches verified.
+        runnerQuery
+          .mockResolvedValueOnce(undefined) // lock
+          .mockResolvedValueOnce([{ count: '1' }]) // count = 1
+          .mockResolvedValueOnce([
+            { email: 'founder@example.com' },
+            { email: 'founder@example.com' },
+          ]) // unverified SELECT returns 2 rows — length !== 1
+          .mockResolvedValueOnce(undefined); // unlock
+
+        const caught = await service.createFirstAdmin(dto).catch((e: unknown) => e);
+        expect(caught).toBeInstanceOf(ConflictException);
+        expect((caught as Error).message).toMatch(/already completed/i);
+        expect(auth.api.signUpEmail).not.toHaveBeenCalled();
+        // No UPDATE emailVerified statement should have been issued.
+        const updateCall = runnerQuery.mock.calls.find(
+          (c) =>
+            typeof c[0] === 'string' &&
+            c[0].includes('UPDATE "user"') &&
+            c[0].includes('emailVerified'),
+        );
+        expect(updateCall).toBeUndefined();
       });
     });
 

@@ -4,7 +4,7 @@ import { AgentApiKey } from './agent-api-key.entity';
 import { timestampType, timestampDefault } from '../common/utils/postgres-sql';
 
 @Entity('agents')
-@Index(['tenant_id', 'name'], { unique: true })
+@Index(['tenant_id', 'name'], { unique: true, where: '"deleted_at" IS NULL' })
 export class Agent {
   @PrimaryColumn('varchar')
   id!: string;
@@ -30,6 +30,14 @@ export class Agent {
   @Column('boolean', { default: false })
   complexity_routing_enabled!: boolean;
 
+  @Column('boolean', { default: true })
+  record_messages!: boolean;
+
+  // Reserved Playground agent (the per-tenant "Playground" agent). Hidden
+  // from the agent list / switcher / counts and not user-creatable/renamable.
+  @Column('boolean', { default: false })
+  is_playground!: boolean;
+
   @ManyToOne(() => Tenant, (t) => t.agents, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'tenant_id' })
   tenant!: Tenant;
@@ -45,4 +53,7 @@ export class Agent {
 
   @Column(timestampType(), { default: timestampDefault() })
   updated_at!: string;
+
+  @Column(timestampType(), { nullable: true, default: null })
+  deleted_at!: string | null;
 }

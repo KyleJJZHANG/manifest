@@ -12,6 +12,7 @@ import { ApiKeyGuard } from './common/guards/api-key.guard';
 import { ApiKey } from './entities/api-key.entity';
 import { SessionGuard } from './auth/session.guard';
 import { DatabaseModule } from './database/database.module';
+import { BackfillModule } from './database/backfills/backfill.module';
 import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -19,6 +20,7 @@ import { OtlpModule } from './otlp/otlp.module';
 import { ModelPricesModule } from './model-prices/model-prices.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RoutingModule } from './routing/routing.module';
+import { PlaygroundModule } from './playground/playground.module';
 import { CommonModule } from './common/common.module';
 import { SseModule } from './sse/sse.module';
 import { GithubModule } from './github/github.module';
@@ -70,12 +72,14 @@ const serveStaticImports = frontendPath
     ModelPricesModule,
     NotificationsModule,
     RoutingModule,
+    PlaygroundModule,
     SseModule,
     GithubModule,
     PublicStatsModule,
     SetupModule,
     FreeModelsModule,
     TelemetryModule,
+    BackfillModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: SessionGuard },

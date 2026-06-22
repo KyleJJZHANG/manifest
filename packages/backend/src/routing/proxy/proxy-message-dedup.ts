@@ -57,7 +57,6 @@ export class ProxyMessageDedup {
       where: {
         tenant_id: ctx.tenantId,
         agent_id: ctx.agentId,
-        user_id: ctx.userId,
         model,
         status: 'ok',
         ...(sessionKey ? { session_key: sessionKey } : {}),
@@ -86,11 +85,13 @@ export class ProxyMessageDedup {
         ) {
           return false;
         }
-        const totalPromptTokens =
-          (row.input_tokens ?? 0) + (row.cache_read_tokens ?? 0) + (row.cache_creation_tokens ?? 0);
+        // agent_messages.input_tokens already stores the chat-shape prompt_tokens
+        // (total input including cache reads + creation). Comparing the column
+        // directly avoids double-counting the cache portions which are reported
+        // separately in cache_read_tokens / cache_creation_tokens.
         const endTimeDelta = Math.abs(now - rowTime - durationMs);
         return (
-          totalPromptTokens === usage.prompt_tokens &&
+          (row.input_tokens ?? 0) === usage.prompt_tokens &&
           (row.output_tokens ?? 0) === usage.completion_tokens &&
           endTimeDelta <= SUCCESS_END_TIME_GRACE_MS
         );
@@ -110,7 +111,7 @@ export class ProxyMessageDedup {
     sessionKey?: string | null,
   ): string {
     if (traceId) return `trace:${ctx.tenantId}:${ctx.agentId}:${traceId}`;
-    return `success:${ctx.tenantId}:${ctx.agentId}:${ctx.userId}:${sessionKey ?? 'no-session'}:${model}`;
+    return `success:${ctx.tenantId}:${ctx.agentId}:${sessionKey ?? 'no-session'}:${model}`;
   }
 
   async withSuccessWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

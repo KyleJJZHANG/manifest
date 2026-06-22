@@ -21,6 +21,7 @@ import { PROVIDERS } from '../services/providers.js';
 import { getModelDisplayName } from '../services/model-display.js';
 import { providerIcon, customProviderLogo } from './ProviderIcon.jsx';
 import { authBadgeFor, authLabel } from './AuthBadge.js';
+import { platformIcon } from 'manifest-shared';
 
 const MONO = 'font-family: var(--font-mono);';
 const MONO_XS =
@@ -62,6 +63,21 @@ export function FallbackIcon(): JSX.Element {
     >
       <polyline points="15 17 20 12 15 7" />
       <path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+    </svg>
+  );
+}
+
+export function RecordedIcon(): JSX.Element {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" fill="hsl(var(--destructive) / 0.25)" />
+      <circle cx="12" cy="12" r="5" fill="hsl(var(--destructive))" />
     </svg>
   );
 }
@@ -114,9 +130,10 @@ const HEADER_LABELS: Record<MessageColumnKey, string> = {
   output: 'Output',
   model: 'Model',
   cache: 'Cache',
-  duration: 'Duration',
+  duration: 'Latency',
   status: 'Status',
   feedback: '',
+  agent: 'Harness',
 };
 
 const TOOLTIP_TEXT: Partial<Record<MessageColumnKey, string>> = {
@@ -139,7 +156,7 @@ export function columnHeader(key: MessageColumnKey, tooltips?: boolean): JSX.Ele
 }
 
 export function DateCell(item: MessageRow): JSX.Element {
-  return <td style={`white-space: nowrap; ${MONO_XS}`}>{formatTime(item.timestamp)}</td>;
+  return <td style={`white-space: nowrap; width: 1%; ${MONO_XS}`}>{formatTime(item.timestamp)}</td>;
 }
 
 export function MessageCell(item: MessageRow): JSX.Element {
@@ -159,16 +176,24 @@ export function MessageCell(item: MessageRow): JSX.Element {
 }
 
 export function CostCell(item: MessageRow): JSX.Element {
+  // Subscription rows with a non-zero recorded cost are per-request
+  // subscriptions like OpenCode Go (docs-attributed $/request). Flat-fee
+  // subscriptions (Claude Max, ChatGPT Plus, GLM Coding, Copilot) record
+  // $0 and keep the "Included in subscription" treatment.
+  const isPerRequestSubscription =
+    item.auth_type === 'subscription' && item.cost != null && item.cost > 0;
   return (
     <td style={MONO}>
       <Show
-        when={item.auth_type === 'subscription'}
+        when={item.auth_type === 'subscription' && !isPerRequestSubscription}
         fallback={
           <span
             title={
-              item.cost != null && item.cost > 0 && item.cost < 0.01
-                ? `$${item.cost.toFixed(6)}`
-                : undefined
+              isPerRequestSubscription
+                ? `Per-request subscription cost: $${item.cost!.toFixed(6)}`
+                : item.cost != null && item.cost > 0 && item.cost < 0.01
+                  ? `$${item.cost.toFixed(6)}`
+                  : undefined
             }
           >
             {item.cost != null ? (formatCost(item.cost) ?? '\u2014') : '\u2014'}
@@ -207,23 +232,22 @@ function resolveMessageProviderName(item: MessageRow): string | undefined {
   );
 }
 
-export function ModelCell(
-  item: MessageRow,
-  customProviderName: (m: string) => string | undefined,
-): JSX.Element {
+export function ModelCell(item: MessageRow, onOpenRecording?: (id: string) => void): JSX.Element {
   const provId = resolveMessageProvider(item);
   const provName = resolveMessageProviderName(item);
   // Custom providers are identified by either the literal 'custom' (from
   // inferProviderFromModel on a `custom:...` model name) or by a stored
   // provider column of the form `custom:<uuid>` (from resolveProviderId,
-  // which returns custom-prefixed IDs unchanged).
+  // which returns custom-prefixed IDs unchanged). Their display name arrives
+  // pre-resolved from the backend as `custom_provider_name` (null when the
+  // provider was deleted).
   const isCustomProvider = provId === 'custom' || provId?.startsWith('custom:') === true;
   return (
     <td style={MONO_XS}>
       <span style="display: inline-flex; align-items: center; gap: 4px;">
         {item.model && isCustomProvider ? (
           (() => {
-            const customName = customProviderName(item.model!);
+            const customName = item.custom_provider_name ?? undefined;
             const logo = customProviderLogo(
               customName ?? '',
               16,
@@ -254,7 +278,7 @@ export function ModelCell(
             role="img"
             aria-label={`${provName ?? provId} (${authLabel(item.auth_type)})`}
             title={`${provName ?? provId} (${authLabel(item.auth_type)})`}
-            style="display: inline-flex; flex-shrink: 0; position: relative;"
+            style="display: inline-flex; flex-shrink: 0; position: relative; color: hsl(var(--foreground)); width: 14px; height: 14px;"
           >
             {providerIcon(provId, 14)}
             {authBadgeFor(item.auth_type, 8)}
@@ -262,7 +286,7 @@ export function ModelCell(
         ) : null}
         {item.model
           ? item.model.startsWith('custom:')
-            ? `custom:${customProviderName(item.model) ?? 'Custom'}/${stripCustomPrefix(item.model)}`
+            ? stripCustomPrefix(item.model)
             : getModelDisplayName(item.model)
           : '\u2014'}
         {item.header_tier_name ? (
@@ -293,17 +317,19 @@ export function ModelCell(
 }
 
 export function TokenCell(value: number | null): JSX.Element {
-  return <td style={MONO}>{value != null ? formatNumber(value) : '\u2014'}</td>;
+  return <td style={`width: 130px; ${MONO}`}>{value != null ? formatNumber(value) : '\u2014'}</td>;
 }
 
 export function SmallTokenCell(value: number | null): JSX.Element {
-  return <td style={MONO_XS}>{value != null ? formatNumber(value) : '\u2014'}</td>;
+  return (
+    <td style={`width: 102px; ${MONO_XS}`}>{value != null ? formatNumber(value) : '\u2014'}</td>
+  );
 }
 
 export function CacheCell(item: MessageRow): JSX.Element {
   const has = (item.cache_read_tokens ?? 0) > 0 || (item.cache_creation_tokens ?? 0) > 0;
   return (
-    <td style={MONO_XS}>
+    <td style={`width: 192px; ${MONO_XS}`}>
       {has
         ? `Read: ${formatNumber(item.cache_read_tokens ?? 0)} / Write: ${formatNumber(item.cache_creation_tokens ?? 0)}`
         : '\u2014'}
@@ -319,9 +345,31 @@ export function DurationCell(item: MessageRow): JSX.Element {
   );
 }
 
+export function AgentCell(
+  item: MessageRow,
+  platformLookup?: (
+    name: string,
+  ) => { platform: string | null; category: string | null } | undefined,
+): JSX.Element {
+  const icon = () => {
+    const info = item.agent_name && platformLookup ? platformLookup(item.agent_name) : undefined;
+    return info?.platform ? platformIcon(info.platform, info.category) : undefined;
+  };
+  return (
+    <td style="white-space: nowrap; font-weight: 500; font-size: var(--font-size-xs);">
+      <span style="display: inline-flex; align-items: center; gap: 5px;">
+        <Show when={icon()}>
+          {(src) => <img src={src()} alt="" width="14" height="14" style="flex-shrink: 0;" />}
+        </Show>
+        {item.agent_name ?? '\u2014'}
+      </span>
+    </td>
+  );
+}
+
 export function StatusCell(
   item: MessageRow,
-  agentName: string,
+  agentName: string | undefined,
   onFallbackErrorClick?: (model: string) => void,
 ): JSX.Element {
   return (
@@ -332,9 +380,13 @@ export function StatusCell(
           <span class={`status-badge status-badge--${item.status}`}>
             {item.status === 'fallback_error' && <FallbackIcon />}
             {item.status === 'rate_limited' ? (
-              <A href={`/agents/${encodeURIComponent(agentName)}/limits`}>
-                {formatStatus(item.status)}
-              </A>
+              agentName ? (
+                <A href={`/harnesses/${encodeURIComponent(agentName)}/limits`}>
+                  {formatStatus(item.status)}
+                </A>
+              ) : (
+                formatStatus(item.status)
+              )
             ) : (
               formatStatus(item.status)
             )}
@@ -417,12 +469,16 @@ export function FeedbackCell(
 }
 
 export interface CellRenderContext {
-  agentName: string;
+  agentName?: string;
   customProviderName: (model: string) => string | undefined;
+  agentPlatformLookup?: (
+    name: string,
+  ) => { platform: string | null; category: string | null } | undefined;
   onFallbackErrorClick?: (model: string) => void;
   onFeedbackLike?: (id: string) => void;
   onFeedbackDislike?: (id: string) => void;
   onFeedbackClear?: (id: string) => void;
+  onOpenRecording?: (id: string) => void;
 }
 
 export function renderCell(
@@ -444,7 +500,7 @@ export function renderCell(
     case 'output':
       return SmallTokenCell(item.output_tokens);
     case 'model':
-      return ModelCell(item, ctx.customProviderName);
+      return ModelCell(item, ctx.onOpenRecording);
     case 'cache':
       return CacheCell(item);
     case 'duration':
@@ -458,5 +514,7 @@ export function renderCell(
         ctx.onFeedbackDislike ?? (() => {}),
         ctx.onFeedbackClear ?? (() => {}),
       );
+    case 'agent':
+      return AgentCell(item, ctx.agentPlatformLookup);
   }
 }

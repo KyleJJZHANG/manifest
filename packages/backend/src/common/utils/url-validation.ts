@@ -7,6 +7,7 @@ const PRIVATE_RANGES: { addr: bigint; mask: bigint }[] = [
   cidr('172.16.0.0', 12), // Class B private
   cidr('192.168.0.0', 16), // Class C private
   cidr('169.254.0.0', 16), // Link-local
+  cidr('100.64.0.0', 10), // Carrier-grade NAT (RFC 6598) — routes to cloud fabric (EKS/GKE pods, Tailscale)
   cidr('0.0.0.0', 8), // Current network
 ];
 
@@ -32,10 +33,50 @@ export function isIpLiteral(host: string): boolean {
   return isIP(host) !== 0;
 }
 
+// Collapse an IPv4-mapped IPv6 address to its dotted-quad IPv4 form so the
+// IPv4 range checks can see it. Node's URL parser normalizes
+// `[::ffff:169.254.169.254]` to the *hex* form `::ffff:a9fe:a9fe`, which a
+// dotted-only regex misses — that gap let a mapped literal smuggle a private
+// or cloud-metadata target past the SSRF guard. We expand the (already
+// isIP-validated) literal to its 8 hextets and, when it is IPv4-mapped
+// (`::ffff:0:0/96`), rebuild the embedded IPv4. Non-mapped hosts pass through.
+function unwrapMappedIpv4(host: string): string {
+  if (isIP(host) !== 6) return host;
+  // host is a valid IPv6 literal, so `::` appears at most once and every
+  // group is valid hex (or a single dotted-quad tail) — no defensive parsing.
+  const parseGroups = (segment: string): number[] =>
+    segment === ''
+      ? []
+      : segment.split(':').flatMap((part) => {
+          const dotted = part.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+          if (dotted) {
+            const o = dotted.slice(1).map(Number);
+            return [(o[0] << 8) | o[1], (o[2] << 8) | o[3]];
+          }
+          return [parseInt(part, 16)];
+        });
+
+  const [head, tail] = host.toLowerCase().split('::');
+  const left = parseGroups(head);
+  const right = tail === undefined ? [] : parseGroups(tail);
+  const hextets = [...left, ...Array<number>(8 - left.length - right.length).fill(0), ...right];
+
+  const mapped =
+    hextets[0] === 0 &&
+    hextets[1] === 0 &&
+    hextets[2] === 0 &&
+    hextets[3] === 0 &&
+    hextets[4] === 0 &&
+    hextets[5] === 0xffff;
+  if (!mapped) return host;
+  const hi = hextets[6];
+  const lo = hextets[7];
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 export function isPrivateIp(ip: string): boolean {
-  // Handle IPv4-mapped IPv6 addresses (::ffff:a.b.c.d)
-  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  const normalizedIp = mapped ? mapped[1] : ip;
+  // Collapse IPv4-mapped IPv6 (any textual form) to dotted IPv4 first.
+  const normalizedIp = unwrapMappedIpv4(ip);
 
   // Check IPv6 private ranges
   if (normalizedIp.includes(':')) {
@@ -51,16 +92,27 @@ export function isPrivateIp(ip: string): boolean {
   return PRIVATE_RANGES.some((range) => (addr & range.mask) === range.addr);
 }
 
+// Only the specific IMDS addresses, not the whole link-local /16. Rootless
+// Podman maps `host.containers.internal` to a 169.254.x.y address (commonly
+// 169.254.1.2 with pasta/slirp4netns), and blocking the entire range would
+// stop self-hosted users from reaching their host gateway. The remaining
+// link-local space is still rejected in cloud mode by the private-IP guard
+// (PRIVATE_RANGES below), so the only path that goes through here is
+// allowPrivate: true — and there we still want to block the IMDS endpoints
+// even on a self-hosted box, in case the operator deployed inside EC2/GCE.
 const CLOUD_METADATA_RANGES: { addr: bigint; mask: bigint }[] = [
-  cidr('169.254.169.254', 32), // AWS/GCP/Azure metadata
-  cidr('169.254.0.0', 16), // Link-local
+  cidr('169.254.169.254', 32), // AWS / GCP / Azure / OpenStack IMDS
+  cidr('169.254.169.253', 32), // Alibaba Cloud / OCI IMDS
+  cidr('100.100.100.200', 32), // Alibaba Cloud (alternative)
 ];
 
-const CLOUD_METADATA_V6 = ['fd00::', 'fe80::'];
+// IPv6 IMDS endpoints. ULA (`fd00::/8`) and link-local (`fe80::/10`) are
+// regular private space — not metadata — so they are NOT in this list.
+// `fd00:ec2::254` is the AWS IPv6 IMDS endpoint.
+const CLOUD_METADATA_V6 = ['fd00:ec2::254'];
 
 export function isCloudMetadataIp(ip: string): boolean {
-  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  const normalizedIp = mapped ? mapped[1] : ip;
+  const normalizedIp = unwrapMappedIpv4(ip);
 
   if (normalizedIp.includes(':')) {
     const lower = normalizedIp.toLowerCase();
@@ -101,7 +153,12 @@ export async function validatePublicUrl(
   // (AC-2 in the Mine paper, arXiv:2604.08407). In self-hosted mode we allow
   // http:// for local destinations only — see the final check below.
   if (parsed.protocol === 'http:' && !allowPrivate) {
-    throw new Error('Only https URLs are allowed');
+    throw new Error(
+      'Only https URLs are allowed in cloud mode. ' +
+        'Self-hosted installs allow http:// for private destinations — ' +
+        'set MANIFEST_MODE=selfhosted if you are running Manifest yourself ' +
+        '(e.g. inside Docker, Podman, or Kubernetes).',
+    );
   }
 
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');

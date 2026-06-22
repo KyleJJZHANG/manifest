@@ -1,4 +1,4 @@
-import { IngestEventBusService } from './ingest-event-bus.service';
+import { IngestEventBusService, IngestEvent } from './ingest-event-bus.service';
 
 describe('IngestEventBusService', () => {
   let service: IngestEventBusService;
@@ -13,69 +13,116 @@ describe('IngestEventBusService', () => {
     jest.useRealTimers();
   });
 
-  it('emits to the correct user after debounce', () => {
-    const received: string[] = [];
-    service.forUser('user-1').subscribe((id) => received.push(id));
+  it('emits to the correct tenant after debounce', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => received.push(e));
 
-    service.emit('user-1');
+    service.emit('tenant-1');
     expect(received).toHaveLength(0);
 
-    jest.advanceTimersByTime(1000);
-    expect(received).toEqual(['user-1']);
+    jest.advanceTimersByTime(250);
+    expect(received).toEqual([{ tenantId: 'tenant-1', kind: 'message', userId: undefined }]);
   });
 
-  it('debounces rapid emissions for the same user', () => {
-    const received: string[] = [];
-    service.forUser('user-1').subscribe((id) => received.push(id));
+  it('debounces rapid emissions for the same tenant/kind', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => received.push(e));
 
-    service.emit('user-1');
-    jest.advanceTimersByTime(500);
-    service.emit('user-1');
-    jest.advanceTimersByTime(500);
-    service.emit('user-1');
-    jest.advanceTimersByTime(500);
+    service.emit('tenant-1');
+    jest.advanceTimersByTime(100);
+    service.emit('tenant-1');
+    jest.advanceTimersByTime(100);
+    service.emit('tenant-1');
+    jest.advanceTimersByTime(100);
 
     expect(received).toHaveLength(0);
 
-    jest.advanceTimersByTime(500);
-    expect(received).toEqual(['user-1']);
+    jest.advanceTimersByTime(150);
+    expect(received).toEqual([{ tenantId: 'tenant-1', kind: 'message', userId: undefined }]);
   });
 
-  it('does not deliver events for other users', () => {
-    const received: string[] = [];
-    service.forUser('user-1').subscribe((id) => received.push(id));
+  it('forwards the optional userId attribution', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => received.push(e));
 
-    service.emit('user-2');
-    jest.advanceTimersByTime(1000);
+    service.emit('tenant-1', 'message', 'user-9');
+    jest.advanceTimersByTime(250);
+
+    expect(received).toEqual([{ tenantId: 'tenant-1', kind: 'message', userId: 'user-9' }]);
+  });
+
+  it('different kinds for the same tenant fire independently', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => received.push(e));
+
+    service.emit('tenant-1', 'message');
+    service.emit('tenant-1', 'agent');
+    jest.advanceTimersByTime(250);
+
+    expect(received).toEqual([
+      { tenantId: 'tenant-1', kind: 'message', userId: undefined },
+      { tenantId: 'tenant-1', kind: 'agent', userId: undefined },
+    ]);
+  });
+
+  it('does not deliver events for other tenants', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => received.push(e));
+
+    service.emit('tenant-2');
+    jest.advanceTimersByTime(250);
 
     expect(received).toHaveLength(0);
   });
 
-  it('emits independently for different users', () => {
-    const user1: string[] = [];
-    const user2: string[] = [];
-    service.forUser('user-1').subscribe((id) => user1.push(id));
-    service.forUser('user-2').subscribe((id) => user2.push(id));
+  it('emits independently for different tenants', () => {
+    const tenant1: IngestEvent[] = [];
+    const tenant2: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe((e) => tenant1.push(e));
+    service.forTenant('tenant-2').subscribe((e) => tenant2.push(e));
 
-    service.emit('user-1');
-    service.emit('user-2');
-    jest.advanceTimersByTime(1000);
+    service.emit('tenant-1');
+    service.emit('tenant-2', 'routing');
+    jest.advanceTimersByTime(250);
 
-    expect(user1).toEqual(['user-1']);
-    expect(user2).toEqual(['user-2']);
+    expect(tenant1).toEqual([{ tenantId: 'tenant-1', kind: 'message', userId: undefined }]);
+    expect(tenant2).toEqual([{ tenantId: 'tenant-2', kind: 'routing', userId: undefined }]);
+  });
+
+  it('null tenantId matches no events', () => {
+    const received: IngestEvent[] = [];
+    service.forTenant(null).subscribe((e) => received.push(e));
+
+    service.emit('tenant-1');
+    jest.advanceTimersByTime(250);
+
+    expect(received).toHaveLength(0);
+  });
+
+  it('all() observes every event regardless of tenant', () => {
+    const received: IngestEvent[] = [];
+    service.all().subscribe((e) => received.push(e));
+
+    service.emit('a');
+    service.emit('b', 'agent');
+    jest.advanceTimersByTime(250);
+
+    expect(received).toHaveLength(2);
+    expect(received).toContainEqual({ tenantId: 'a', kind: 'message', userId: undefined });
+    expect(received).toContainEqual({ tenantId: 'b', kind: 'agent', userId: undefined });
   });
 
   it('cleans up timers on module destroy', () => {
-    const received: string[] = [];
-    service.forUser('user-1').subscribe({
-      next: (id) => received.push(id),
-      complete: () => received.push('COMPLETE'),
+    const received: IngestEvent[] = [];
+    service.forTenant('tenant-1').subscribe({
+      next: (e) => received.push(e),
+      complete: () => received.push({ tenantId: 'COMPLETE', kind: 'message' }),
     });
 
-    service.emit('user-1');
+    service.emit('tenant-1');
     service.onModuleDestroy();
     jest.advanceTimersByTime(2000);
 
-    expect(received).toEqual(['COMPLETE']);
+    expect(received).toEqual([{ tenantId: 'COMPLETE', kind: 'message' }]);
   });
 });

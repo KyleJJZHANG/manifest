@@ -1,11 +1,24 @@
-import { createResource, createSignal, For, Show, type Accessor, type Component } from 'solid-js';
+import {
+  createResource,
+  createSignal,
+  For,
+  lazy,
+  Show,
+  Suspense,
+  type Accessor,
+  type Component,
+} from 'solid-js';
 import HeaderTierCard from '../components/HeaderTierCard.js';
-import HeaderTierModal from '../components/HeaderTierModal.js';
 import HeaderTierSnippetModal from '../components/HeaderTierSnippetModal.js';
+
+// The create/edit header-tier modal only mounts behind a `<Show>` (click).
+// Lazy-load it so the Routing route's custom-tiers section stays lean.
+const HeaderTierModal = lazy(() => import('../components/HeaderTierModal.js'));
 import {
   listHeaderTiers,
   deleteHeaderTier,
   overrideHeaderTier,
+  setHeaderTierResponseMode,
   toggleHeaderTier,
   type HeaderTier,
 } from '../services/api/header-tiers.js';
@@ -13,6 +26,9 @@ import type {
   AvailableModel,
   AuthType,
   CustomProviderData,
+  ModelRoute,
+  RequestParamDefaults,
+  ResponseMode,
   RoutingProvider,
 } from '../services/api.js';
 import { toast } from '../services/toast-store.js';
@@ -25,13 +41,27 @@ export interface RoutingHeaderTiersSectionProps {
   connectedProviders: Accessor<RoutingProvider[]>;
   externalTiers?: Accessor<HeaderTier[] | undefined>;
   externalRefetch?: () => void;
+  externalMutate?: (mutator: (prev: HeaderTier[] | undefined) => HeaderTier[] | undefined) => void;
   embedded?: boolean;
+  getModelParams?: (
+    scope: string,
+    provider: string,
+    authType: AuthType,
+    model: string,
+  ) => RequestParamDefaults | null;
+  setModelParams?: (
+    scope: string,
+    provider: string,
+    authType: AuthType,
+    model: string,
+    params: RequestParamDefaults | null,
+  ) => Promise<unknown>;
 }
 
 type Props = RoutingHeaderTiersSectionProps;
 
 const RoutingHeaderTiersSection: Component<Props> = (props) => {
-  const [internalTiersRes, { refetch: internalRefetch }] = createResource(
+  const [internalTiersRes, { refetch: internalRefetch, mutate: internalMutate }] = createResource(
     () => (props.externalTiers ? false : props.agentName()),
     (name) =>
       listHeaderTiers(name as string).catch((err) => {
@@ -45,6 +75,25 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
     else void internalRefetch();
   };
 
+  // Apply an optimistic update to the resource so the UI reflects fallback
+  // changes immediately, mirroring the tier path. Without this the refetch
+  // races the persist call and shows stale data on first click.
+  // When the caller doesn't know the new routes (e.g. tier reset, which also
+  // clears override_route), fall back to a refetch.
+  const applyFallbackUpdate = (
+    tierId: string,
+    updatedRoutes: ModelRoute[] | null | undefined,
+  ): void => {
+    if (updatedRoutes === undefined) {
+      refetch();
+      return;
+    }
+    const update = (prev: HeaderTier[] | undefined): HeaderTier[] | undefined =>
+      prev?.map((t) => (t.id === tierId ? { ...t, fallback_routes: updatedRoutes } : t));
+    if (props.externalMutate) props.externalMutate(update);
+    else internalMutate(update);
+  };
+
   // Manage modal: lists all tiers. `null` = closed.
   const [manageOpen, setManageOpen] = createSignal(false);
   // Create/edit modal: `null` = closed, `'new'` = create, otherwise editing.
@@ -53,6 +102,7 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
   const [snippetTier, setSnippetTier] = createSignal<HeaderTier | null>(null);
   // Which tier is currently being toggled (loading state).
   const [toggling, setToggling] = createSignal<string | null>(null);
+  const [changingResponseMode, setChangingResponseMode] = createSignal<string | null>(null);
 
   const tiers = (): HeaderTier[] =>
     (props.externalTiers ? props.externalTiers() : internalTiersRes()) ?? [];
@@ -63,9 +113,10 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
     model: string,
     provider: string,
     authType?: AuthType,
+    providerKeyLabel?: string,
   ): Promise<void> => {
     try {
-      await overrideHeaderTier(props.agentName(), id, model, provider, authType);
+      await overrideHeaderTier(props.agentName(), id, model, provider, authType, providerKeyLabel);
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update tier');
@@ -90,6 +141,26 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
       toast.error(err instanceof Error ? err.message : 'Failed to toggle tier');
     } finally {
       setToggling(null);
+    }
+  };
+
+  const handleResponseModeChange = async (id: string, responseMode: ResponseMode) => {
+    setChangingResponseMode(id);
+    try {
+      const updated = await setHeaderTierResponseMode(props.agentName(), id, responseMode);
+      const update = (prev: HeaderTier[] | undefined): HeaderTier[] | undefined =>
+        prev?.map((t) => (t.id === id ? updated : t));
+      if (props.externalMutate) props.externalMutate(update);
+      else internalMutate(update);
+      toast.success(
+        responseMode === 'stream'
+          ? 'Streaming response mode enabled'
+          : 'Buffered response mode enabled',
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update response mode');
+    } finally {
+      setChangingResponseMode(null);
     }
   };
 
@@ -143,9 +214,16 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
                 models={props.models()}
                 customProviders={props.customProviders()}
                 connectedProviders={props.connectedProviders()}
-                onOverride={(m, p, a) => handleOverride(tier.id, m, p, a)}
-                onFallbacksUpdate={() => refetch()}
+                onOverride={(m, p, a, label) => handleOverride(tier.id, m, p, a, label)}
+                onFallbacksUpdate={(_fallbacks, updatedRoutes) =>
+                  applyFallbackUpdate(tier.id, updatedRoutes)
+                }
                 onEdit={() => setModalTier(tier)}
+                onDisable={() => handleToggle(tier.id, false)}
+                changingResponseMode={changingResponseMode() === tier.id}
+                onResponseModeChange={(mode) => handleResponseModeChange(tier.id, mode)}
+                getModelParams={props.getModelParams}
+                setModelParams={props.setModelParams}
               />
             )}
           </For>
@@ -258,19 +336,22 @@ const RoutingHeaderTiersSection: Component<Props> = (props) => {
       {/* ── Create / Edit modal ────────────────────────── */}
       <Show when={modalTier()} keyed>
         {(state) => (
-          <HeaderTierModal
-            agentName={props.agentName()}
-            existingTiers={tiers()}
-            editing={state === 'new' ? undefined : state}
-            onClose={() => setModalTier(null)}
-            onSaved={(saved) => {
-              const wasCreate = state === 'new';
-              setModalTier(null);
-              refetch();
-              if (wasCreate) setSnippetTier(saved);
-            }}
-            onDelete={state !== 'new' ? handleDeleteFromEdit : undefined}
-          />
+          <Suspense fallback={null}>
+            <HeaderTierModal
+              agentName={props.agentName()}
+              existingTiers={tiers()}
+              editing={state === 'new' ? undefined : state}
+              models={props.models()}
+              onClose={() => setModalTier(null)}
+              onSaved={(saved) => {
+                const wasCreate = state === 'new';
+                setModalTier(null);
+                refetch();
+                if (wasCreate) setSnippetTier(saved);
+              }}
+              onDelete={state !== 'new' ? handleDeleteFromEdit : undefined}
+            />
+          </Suspense>
         )}
       </Show>
 

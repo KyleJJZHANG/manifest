@@ -5,6 +5,18 @@ import { ProxyMessageDedup } from '../proxy-message-dedup';
 import { IngestEventBusService } from '../../../common/services/ingest-event-bus.service';
 import { ThoughtSignatureCache } from '../thought-signature-cache';
 import { ThinkingBlockCache } from '../thinking-block-cache';
+import { ReasoningContentCache } from '../reasoning-content-cache';
+import { ResponsesSseError } from '../chatgpt-adapter';
+
+/**
+ * Flush enough microtasks for the recorder's fire-and-forget chain to
+ * complete. The chain is: `canonicalizeAgentMessageKeys` → `messageRepo.insert`
+ * → `.catch(...)` — three awaits in sequence. Ten rounds of `Promise.resolve`
+ * is deterministic (no timer involved) and forgiving if the chain grows.
+ */
+async function flushRecorderMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
 
 function mockResponse(): {
   res: Record<string, jest.Mock | boolean | number>;
@@ -47,11 +59,12 @@ function mockRequest(
   body: Record<string, unknown>,
   userId = 'user-1',
   headers: Record<string, string> = {},
+  tenantId = 'tenant-1',
 ) {
   return {
     ingestionContext: {
       userId,
-      tenantId: 'tenant-1',
+      tenantId,
       agentId: 'agent-1',
       agentName: 'test-agent',
     },
@@ -124,11 +137,27 @@ describe('ProxyController', () => {
     };
     mockMessageManager.getRepository.mockReturnValue(mockMessageRepo);
     mockPricingCache = { getByModel: jest.fn().mockReturnValue(undefined) };
+    const mockCustomProviders = {
+      canonicalizeAgentMessageKeys: jest
+        .fn()
+        .mockImplementation(
+          async (_agentId: string, provider: string | null, model: string | null) => ({
+            provider: provider ?? null,
+            model: model ?? null,
+          }),
+        ),
+    };
     recorder = new ProxyMessageRecorder(
       mockMessageRepo as never,
       mockPricingCache as never,
       new ProxyMessageDedup(),
       { emit: jest.fn() } as unknown as IngestEventBusService,
+      mockCustomProviders as never,
+      {
+        getCostPerRequest: jest.fn().mockReturnValue(null),
+        resolveCostPerRequest: jest.fn().mockResolvedValue(null),
+      } as never,
+      { save: jest.fn() } as never,
     );
     controller = new ProxyController(
       proxyService as never,
@@ -137,11 +166,30 @@ describe('ProxyController', () => {
       recorder,
       new ThoughtSignatureCache(),
       new ThinkingBlockCache(),
+      new ReasoningContentCache(),
+      { isRecording: jest.fn().mockResolvedValue(false), invalidate: jest.fn() } as never,
     );
   });
 
   afterEach(() => {
     recorder.onModuleDestroy();
+  });
+
+  it('should expose /v1/models with the Manifest auto route', () => {
+    expect(controller.models()).toEqual({
+      object: 'list',
+      data: [
+        {
+          id: 'auto',
+          object: 'model',
+          type: 'model',
+          display_name: 'Manifest Auto',
+        },
+      ],
+      has_more: false,
+      first_id: 'auto',
+      last_id: 'auto',
+    });
   });
 
   it('should return JSON response for non-streaming OpenAI provider', async () => {
@@ -179,6 +227,137 @@ describe('ProxyController', () => {
     expect(headers['X-Manifest-Provider']).toBe('OpenAI');
     expect(headers['X-Manifest-Confidence']).toBe('0.9');
     expect(headers['X-Manifest-Reason']).toBe('scored');
+  });
+
+  it('should expose /v1/responses and convert chat completions output to Responses format', async () => {
+    const responseBody = {
+      created: 1234,
+      model: 'gpt-4o',
+      choices: [{ message: { content: 'hello' } }],
+      usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+    };
+    const mockProviderResp = new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    proxyService.proxyRequest.mockResolvedValue({
+      forward: {
+        response: mockProviderResp,
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      },
+      meta: {
+        tier: 'simple',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.9,
+        reason: 'scored',
+      },
+    });
+
+    const req = mockRequest({ input: 'hi' });
+    const { res } = mockResponse();
+
+    await controller.responses(req as never, res as never);
+
+    expect(proxyService.proxyRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ apiMode: 'responses', body: { input: 'hi' } }),
+    );
+    const json = (res.json as jest.Mock).mock.calls[0][0];
+    expect(json.object).toBe('response');
+    expect(json.output[0].content[0]).toEqual({
+      type: 'output_text',
+      text: 'hello',
+      annotations: [],
+    });
+    expect(json.usage.input_tokens).toBe(4);
+  });
+
+  it('should expose /v1/messages and convert chat completions output to Anthropic Messages format', async () => {
+    const responseBody = {
+      id: 'cc_1',
+      model: 'claude-sonnet-4',
+      choices: [{ message: { content: 'hi there' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+    };
+    const mockProviderResp = new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    proxyService.proxyRequest.mockResolvedValue({
+      forward: {
+        response: mockProviderResp,
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      },
+      meta: {
+        tier: 'simple',
+        model: 'claude-sonnet-4',
+        provider: 'Anthropic',
+        confidence: 0.9,
+        reason: 'scored',
+      },
+    });
+
+    const req = mockRequest({
+      model: 'claude-sonnet-4',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const { res } = mockResponse();
+
+    await controller.messages(req as never, res as never);
+
+    expect(proxyService.proxyRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ apiMode: 'messages' }),
+    );
+    const json = (res.json as jest.Mock).mock.calls[0][0];
+    expect(json.type).toBe('message');
+    expect(json.role).toBe('assistant');
+    expect(json.content).toEqual([{ type: 'text', text: 'hi there' }]);
+    expect(json.stop_reason).toBe('end_turn');
+    expect(json.usage).toMatchObject({ input_tokens: 4, output_tokens: 2 });
+  });
+
+  it('should pass through native Responses JSON bodies', async () => {
+    const responseBody = {
+      id: 'resp_1',
+      object: 'response',
+      output: [{ type: 'message' }],
+      usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+    };
+    const mockProviderResp = new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    proxyService.proxyRequest.mockResolvedValue({
+      forward: {
+        response: mockProviderResp,
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+        isResponses: true,
+      },
+      meta: {
+        tier: 'simple',
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        confidence: 0.9,
+        reason: 'scored',
+      },
+    });
+
+    const req = mockRequest({ input: 'hi' });
+    const { res } = mockResponse();
+
+    await controller.responses(req as never, res as never);
+
+    expect(res.json).toHaveBeenCalledWith(responseBody);
   });
 
   it('should convert Google response for non-streaming', async () => {
@@ -641,7 +820,7 @@ describe('ProxyController', () => {
         choices: expect.arrayContaining([
           expect.objectContaining({
             message: expect.objectContaining({
-              content: '[🦚 Manifest] Something broke on our end. Try again in a moment.',
+              content: expect.stringContaining('[🦚 Manifest M500]'),
             }),
           }),
         ]),
@@ -666,6 +845,36 @@ describe('ProxyController', () => {
         }),
       }),
     );
+  });
+
+  it('should surface collected Responses SSE failures as upstream errors', async () => {
+    proxyService.proxyRequest.mockRejectedValue(
+      new ResponsesSseError(
+        'Model unavailable',
+        404,
+        JSON.stringify({
+          error: {
+            message: 'Model unavailable',
+            code: 'model_not_found',
+            type: 'invalid_request_error',
+          },
+        }),
+      ),
+    );
+
+    const req = mockRequest({ messages: [{ role: 'user', content: 'test' }] });
+    const { res } = mockResponse();
+
+    await controller.chatCompletions(req as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({
+      error: {
+        message: 'Model unavailable',
+        type: 'upstream_error',
+        status: 404,
+      },
+    });
   });
 
   it('should forward HttpException as friendly chat message', async () => {
@@ -723,6 +932,7 @@ describe('ProxyController', () => {
     const { res } = mockResponse();
 
     await controller.chatCompletions(req as never, res as never);
+    await flushRecorderMicrotasks();
 
     expect(mockMessageRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -763,6 +973,7 @@ describe('ProxyController', () => {
     const { res } = mockResponse();
 
     await controller.chatCompletions(req as never, res as never);
+    await flushRecorderMicrotasks();
 
     expect(mockMessageRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -880,8 +1091,8 @@ describe('ProxyController', () => {
 
       await controller.chatCompletions(req as never, res as never);
 
-      expect(rateLimiter.checkLimit).toHaveBeenCalledWith('user-1');
-      expect(rateLimiter.acquireSlot).toHaveBeenCalledWith('user-1');
+      expect(rateLimiter.checkLimit).toHaveBeenCalledWith('tenant-1');
+      expect(rateLimiter.acquireSlot).toHaveBeenCalledWith('tenant-1');
     });
 
     it('should releaseSlot even when proxyService throws', async () => {
@@ -892,7 +1103,7 @@ describe('ProxyController', () => {
 
       await controller.chatCompletions(req as never, res as never);
 
-      expect(rateLimiter.releaseSlot).toHaveBeenCalledWith('user-1');
+      expect(rateLimiter.releaseSlot).toHaveBeenCalledWith('tenant-1');
     });
 
     it('should not call proxyService when checkLimit throws', async () => {
@@ -962,6 +1173,7 @@ describe('ProxyController', () => {
       const { res } = mockResponse();
 
       await controller.chatCompletions(req as never, res as never);
+      await flushRecorderMicrotasks();
 
       expect(mockMessageRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1421,7 +1633,7 @@ describe('ProxyController', () => {
 
       await controller.chatCompletions(req as never, res as never);
 
-      expect(rateLimiter.releaseSlot).toHaveBeenCalledWith('user-1');
+      expect(rateLimiter.releaseSlot).toHaveBeenCalledWith('tenant-1');
     });
   });
 
@@ -1443,7 +1655,7 @@ describe('ProxyController', () => {
           choices: expect.arrayContaining([
             expect.objectContaining({
               message: expect.objectContaining({
-                content: '[🦚 Manifest] Something broke on our end. Try again in a moment.',
+                content: expect.stringContaining('[🦚 Manifest M500]'),
               }),
             }),
           ]),
@@ -1494,7 +1706,7 @@ describe('ProxyController', () => {
           choices: expect.arrayContaining([
             expect.objectContaining({
               message: expect.objectContaining({
-                content: '[🦚 Manifest] Something broke on our end. Try again in a moment.',
+                content: expect.stringContaining('[🦚 Manifest M500]'),
               }),
             }),
           ]),
@@ -1622,8 +1834,6 @@ describe('ProxyController', () => {
     });
 
     it('should allow recording after cooldown expires', async () => {
-      jest.useFakeTimers();
-
       const limitError = new HttpException('Limit exceeded', 429);
       proxyService.proxyRequest.mockRejectedValue(limitError);
 
@@ -1631,18 +1841,22 @@ describe('ProxyController', () => {
       const req1 = mockRequest({ messages: [{ role: 'user', content: 'a' }] });
       const { res: res1 } = mockResponse();
       await controller.chatCompletions(req1 as never, res1 as never);
+      await flushRecorderMicrotasks();
       expect(mockMessageRepo.insert).toHaveBeenCalledTimes(1);
 
-      // Advance past cooldown (60s)
-      jest.advanceTimersByTime(60_001);
+      // Expire the cooldown entry directly instead of advancing fake
+      // timers — fake timers would also freeze the microtask flush we
+      // rely on to wait for the recorder's fire-and-forget insert.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const map = (recorder as any).rateLimitCooldown as Map<string, number>;
+      map.set('tenant-1:agent-1', Date.now() - 120_000);
 
       // Second 429 after cooldown — should record again
       const req2 = mockRequest({ messages: [{ role: 'user', content: 'b' }] });
       const { res: res2 } = mockResponse();
       await controller.chatCompletions(req2 as never, res2 as never);
+      await flushRecorderMicrotasks();
       expect(mockMessageRepo.insert).toHaveBeenCalledTimes(2);
-
-      jest.useRealTimers();
     });
 
     it('should allow recording for different agents within cooldown', async () => {
@@ -1667,6 +1881,7 @@ describe('ProxyController', () => {
       };
       const { res: res2 } = mockResponse();
       await controller.chatCompletions(req2 as never, res2 as never);
+      await flushRecorderMicrotasks();
 
       expect(mockMessageRepo.insert).toHaveBeenCalledTimes(2);
     });
@@ -1731,6 +1946,21 @@ describe('ProxyController', () => {
         mockPricingCache as never,
         new ProxyMessageDedup(),
         { emit: jest.fn() } as unknown as IngestEventBusService,
+        {
+          canonicalizeAgentMessageKeys: jest
+            .fn()
+            .mockImplementation(
+              async (_agentId: string, provider: string | null, model: string | null) => ({
+                provider: provider ?? null,
+                model: model ?? null,
+              }),
+            ),
+        } as never,
+        {
+          getCostPerRequest: jest.fn().mockReturnValue(null),
+          resolveCostPerRequest: jest.fn().mockResolvedValue(null),
+        } as never,
+        { save: jest.fn() } as never,
       );
 
       const cooldownMap = (timedRecorder as any).rateLimitCooldown as Map<string, number>;
@@ -1752,6 +1982,21 @@ describe('ProxyController', () => {
         mockPricingCache as never,
         new ProxyMessageDedup(),
         { emit: jest.fn() } as unknown as IngestEventBusService,
+        {
+          canonicalizeAgentMessageKeys: jest
+            .fn()
+            .mockImplementation(
+              async (_agentId: string, provider: string | null, model: string | null) => ({
+                provider: provider ?? null,
+                model: model ?? null,
+              }),
+            ),
+        } as never,
+        {
+          getCostPerRequest: jest.fn().mockReturnValue(null),
+          resolveCostPerRequest: jest.fn().mockResolvedValue(null),
+        } as never,
+        { save: jest.fn() } as never,
       );
 
       timedRecorder.onModuleDestroy();
@@ -1766,7 +2011,7 @@ describe('ProxyController', () => {
     });
   });
 
-  describe('seenUsers bounded Map with TTL', () => {
+  describe('seenTenants bounded Map with TTL', () => {
     const makeProxyResult = () => ({
       forward: {
         response: new Response('{}', { status: 200 }),
@@ -1777,50 +2022,65 @@ describe('ProxyController', () => {
       meta: { tier: 'simple' as const, model: 'gpt-4o', provider: 'OpenAI', confidence: 0.9 },
     });
 
-    it('should evict oldest user when MAX_SEEN_USERS is reached', async () => {
+    it('should evict oldest tenant when MAX_SEEN_TENANTS is reached', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const seenUsers = (controller as any).seenUsers as Map<string, number>;
+      const seenTenants = (controller as any).seenTenants as Map<string, number>;
 
       const now = Date.now();
       for (let i = 0; i < 9_999; i++) {
-        seenUsers.set(`prefill-user-${i}`, now);
+        seenTenants.set(`prefill-tenant-${i}`, now);
       }
 
       proxyService.proxyRequest.mockResolvedValue(makeProxyResult());
-      const req1 = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'user-9999');
+      const req1 = mockRequest(
+        { messages: [{ role: 'user', content: 'hi' }] },
+        'user-9999',
+        {},
+        'tenant-9999',
+      );
       const { res: res1 } = mockResponse();
       await controller.chatCompletions(req1 as never, res1 as never);
 
-      expect(seenUsers.size).toBe(10_000);
+      expect(seenTenants.size).toBe(10_000);
 
       proxyService.proxyRequest.mockResolvedValue(makeProxyResult());
-      const req2 = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'user-10000');
+      const req2 = mockRequest(
+        { messages: [{ role: 'user', content: 'hi' }] },
+        'user-10000',
+        {},
+        'tenant-10000',
+      );
       const { res: res2 } = mockResponse();
       await controller.chatCompletions(req2 as never, res2 as never);
 
-      expect(seenUsers.size).toBe(10_000);
-      expect(seenUsers.has('prefill-user-0')).toBe(false);
-      expect(seenUsers.has('user-10000')).toBe(true);
+      expect(seenTenants.size).toBe(10_000);
+      expect(seenTenants.has('prefill-tenant-0')).toBe(false);
+      expect(seenTenants.has('tenant-10000')).toBe(true);
     });
 
     it('should evict expired entries older than 24 hours', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const seenUsers = (controller as any).seenUsers as Map<string, number>;
+      const seenTenants = (controller as any).seenTenants as Map<string, number>;
 
       const twentyFiveHoursAgo = Date.now() - 25 * 60 * 60 * 1000;
-      seenUsers.set('old-user-1', twentyFiveHoursAgo);
-      seenUsers.set('old-user-2', twentyFiveHoursAgo);
-      seenUsers.set('recent-user', Date.now());
+      seenTenants.set('old-tenant-1', twentyFiveHoursAgo);
+      seenTenants.set('old-tenant-2', twentyFiveHoursAgo);
+      seenTenants.set('recent-tenant', Date.now());
 
       proxyService.proxyRequest.mockResolvedValue(makeProxyResult());
-      const req = mockRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'new-user');
+      const req = mockRequest(
+        { messages: [{ role: 'user', content: 'hi' }] },
+        'new-user',
+        {},
+        'new-tenant',
+      );
       const { res } = mockResponse();
       await controller.chatCompletions(req as never, res as never);
 
-      expect(seenUsers.has('old-user-1')).toBe(false);
-      expect(seenUsers.has('old-user-2')).toBe(false);
-      expect(seenUsers.has('recent-user')).toBe(true);
-      expect(seenUsers.has('new-user')).toBe(true);
+      expect(seenTenants.has('old-tenant-1')).toBe(false);
+      expect(seenTenants.has('old-tenant-2')).toBe(false);
+      expect(seenTenants.has('recent-tenant')).toBe(true);
+      expect(seenTenants.has('new-tenant')).toBe(true);
     });
   });
 
@@ -1880,8 +2140,8 @@ describe('ProxyController', () => {
 
     it('should transform Anthropic streaming through createAnthropicStreamTransformer', async () => {
       const mockProviderResp = createMockStreamResponse([
-        'event: message_start\n{"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
-        'event: content_block_delta\n{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
       ]);
 
       proxyService.proxyRequest.mockResolvedValue({
@@ -2217,26 +2477,24 @@ describe('ProxyController', () => {
       await controller.chatCompletions(req as never, res as never);
       await new Promise((r) => setTimeout(r, 10));
 
-      // 4 inserts: primary failure + 2 intermediate failures + fallback success
-      expect(mockMessageRepo.insert).toHaveBeenCalledTimes(4);
+      // 3 inserts: primary failure + 1 batched failed-fallbacks + fallback success
+      expect(mockMessageRepo.insert).toHaveBeenCalledTimes(3);
 
-      // Intermediate failures recorded as fallback_error (handled)
-      expect(mockMessageRepo.insert).toHaveBeenCalledWith(
+      // Intermediate failures batched into a single insert with both rows
+      expect(mockMessageRepo.insert).toHaveBeenCalledWith([
         expect.objectContaining({
           model: 'deepseek-chat',
           status: 'fallback_error',
           fallback_from_model: 'gemini-flash',
           fallback_index: 0,
         }),
-      );
-      expect(mockMessageRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-4o-mini',
           status: 'fallback_error',
           fallback_from_model: 'gemini-flash',
           fallback_index: 1,
         }),
-      );
+      ]);
     });
 
     it('should record message with zero tokens when response has no usage data', async () => {
@@ -2363,7 +2621,7 @@ describe('ProxyController', () => {
           error_message: 'primary error',
         }),
       );
-      expect(mockMessageRepo.insert).toHaveBeenCalledWith(
+      expect(mockMessageRepo.insert).toHaveBeenCalledWith([
         expect.objectContaining({
           model: 'deepseek-chat',
           status: 'error',
@@ -2371,7 +2629,7 @@ describe('ProxyController', () => {
           fallback_index: 0,
           error_message: 'auth fail',
         }),
-      );
+      ]);
       expect(headers['X-Manifest-Fallback-Exhausted']).toBe('true');
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -2563,28 +2821,26 @@ describe('ProxyController', () => {
       await controller.chatCompletions(req as never, res as never);
       await new Promise((r) => setTimeout(r, 10));
 
-      // 3 inserts: primary (fallback_error) + intermediate (fallback_error) + last (error)
-      expect(mockMessageRepo.insert).toHaveBeenCalledTimes(3);
+      // 2 inserts: primary (fallback_error) + 1 batched failed-fallbacks (2 rows)
+      expect(mockMessageRepo.insert).toHaveBeenCalledTimes(2);
       expect(mockMessageRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gemini-flash',
           status: 'fallback_error',
         }),
       );
-      expect(mockMessageRepo.insert).toHaveBeenCalledWith(
+      expect(mockMessageRepo.insert).toHaveBeenCalledWith([
         expect.objectContaining({
           model: 'deepseek-chat',
           status: 'fallback_error',
           fallback_index: 0,
         }),
-      );
-      expect(mockMessageRepo.insert).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-4o-mini',
           status: 'error',
           fallback_index: 1,
         }),
-      );
+      ]);
     });
   });
 
@@ -2626,13 +2882,13 @@ describe('ProxyController', () => {
     await controller.chatCompletions(req as never, res as never);
     await new Promise((r) => setTimeout(r, 50));
 
-    // Fallback failure recorded with auth_type from meta
-    expect(mockMessageRepo.insert).toHaveBeenCalledWith(
+    // Fallback failure recorded with auth_type from meta (batched as array)
+    expect(mockMessageRepo.insert).toHaveBeenCalledWith([
       expect.objectContaining({
         model: 'deepseek-chat',
         auth_type: 'subscription',
       }),
-    );
+    ]);
     // Primary failure also recorded with auth_type
     expect(mockMessageRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
