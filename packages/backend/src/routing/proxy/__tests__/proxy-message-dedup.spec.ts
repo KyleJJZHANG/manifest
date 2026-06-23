@@ -196,18 +196,19 @@ describe('ProxyMessageDedup', () => {
   /* ── findExistingSuccessMessage ── */
 
   describe('findExistingSuccessMessage', () => {
-    it('should return trace-matched message when traceId is provided', async () => {
+    it('should return a same-trace row that matches this completion', async () => {
+      const now = Date.now();
       const existing = {
         id: 'msg-1',
-        timestamp: new Date().toISOString(),
+        timestamp: new Date(now - 500).toISOString(),
         input_tokens: 100,
         output_tokens: 50,
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
-        duration_ms: 1000,
+        duration_ms: 500,
       };
       const repo = makeMockMessageRepo();
-      repo.findOne.mockResolvedValue(existing);
+      repo.find.mockResolvedValueOnce([existing]); // trace-scoped query
 
       const result = await dedup.findExistingSuccessMessage(
         repo as unknown as any,
@@ -218,17 +219,48 @@ describe('ProxyMessageDedup', () => {
       );
 
       expect(result).toBe(existing);
-      expect(repo.findOne).toHaveBeenCalledWith(
+      expect(repo.find).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({ trace_id: 'trace-abc', status: 'ok' }),
         }),
       );
     });
 
+    it('does not dedup a same-trace row whose tokens differ (multi-step agent run)', async () => {
+      // Every LLM call in a tool-loop run reuses one traceparent. A prior step
+      // shares the trace but has different token counts, so it must NOT collapse
+      // the current call — we fall through to the model search (no match) and
+      // the caller inserts a new row.
+      const now = Date.now();
+      const priorStep = {
+        id: 'msg-prev-step',
+        timestamp: new Date(now - 500).toISOString(),
+        input_tokens: 5000,
+        output_tokens: 40,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        duration_ms: 500,
+      };
+      const repo = makeMockMessageRepo();
+      repo.find
+        .mockResolvedValueOnce([priorStep]) // trace-scoped: same trace, different tokens
+        .mockResolvedValueOnce([]); // model-scoped: nothing
+
+      const result = await dedup.findExistingSuccessMessage(
+        repo as unknown as any,
+        testCtx,
+        'gpt-4o',
+        { prompt_tokens: 11000, completion_tokens: 90 },
+        'trace-abc',
+      );
+
+      expect(result).toBeNull();
+      expect(repo.find).toHaveBeenCalledTimes(2);
+    });
+
     it('should fall through to model-based search when no trace match', async () => {
       const repo = makeMockMessageRepo();
-      repo.findOne.mockResolvedValue(null); // no trace match
-      repo.find.mockResolvedValue([]); // no model match
+      repo.find.mockResolvedValue([]); // neither trace nor model match
 
       const result = await dedup.findExistingSuccessMessage(
         repo as unknown as any,
@@ -239,7 +271,7 @@ describe('ProxyMessageDedup', () => {
       );
 
       expect(result).toBeNull();
-      expect(repo.find).toHaveBeenCalled();
+      expect(repo.find).toHaveBeenCalledTimes(2);
     });
 
     it('should match by token counts and timing without traceId', async () => {

@@ -30,8 +30,17 @@ export class ProxyMessageDedup {
     traceId?: string,
     sessionKey?: string | null,
   ): Promise<DedupMatch | null> {
+    const now = Date.now();
+
+    // A same-trace row is only a duplicate of THIS completion when its token
+    // counts and end-time also line up. Without the usage+timing check, every
+    // LLM call in a multi-step agent run — which reuses one traceparent for the
+    // whole conversation — collapsed into the first row. Distinct calls carry
+    // distinct token counts, so they now each get their own message; genuine
+    // duplicate reports (retries, the success+recording double-write) still
+    // dedup because their tokens and timing match.
     if (traceId) {
-      const existing = await messageRepo.findOne({
+      const byTrace = await messageRepo.find({
         where: {
           tenant_id: ctx.tenantId,
           agent_id: ctx.agentId,
@@ -48,11 +57,12 @@ export class ProxyMessageDedup {
           'duration_ms',
         ],
         order: { timestamp: 'DESC' },
+        take: 10,
       });
-      if (existing) return existing;
+      const traceMatch = byTrace.find((row) => this.matchesCompletion(row, usage, now));
+      if (traceMatch) return traceMatch;
     }
 
-    const now = Date.now();
     const recentByModel = await messageRepo.find({
       where: {
         tenant_id: ctx.tenantId,
@@ -74,28 +84,33 @@ export class ProxyMessageDedup {
       take: 10,
     });
 
+    return recentByModel.find((row) => this.matchesCompletion(row, usage, now)) ?? null;
+  }
+
+  /**
+   * True when an existing `ok` row is the same completion as the one being
+   * recorded: identical input/output token counts and an end-time within the
+   * grace window. Shared by the trace-scoped and model-scoped dedup paths.
+   */
+  private matchesCompletion(row: DedupMatch, usage: StreamUsage, now: number): boolean {
+    const rowTime = new Date(row.timestamp).getTime();
+    const durationMs = row.duration_ms ?? null;
+    if (
+      Number.isNaN(rowTime) ||
+      durationMs == null ||
+      now - rowTime > SUCCESS_SESSION_DEDUP_WINDOW_MS
+    ) {
+      return false;
+    }
+    // agent_messages.input_tokens already stores the chat-shape prompt_tokens
+    // (total input including cache reads + creation). Comparing the column
+    // directly avoids double-counting the cache portions which are reported
+    // separately in cache_read_tokens / cache_creation_tokens.
+    const endTimeDelta = Math.abs(now - rowTime - durationMs);
     return (
-      recentByModel.find((row) => {
-        const rowTime = new Date(row.timestamp).getTime();
-        const durationMs = row.duration_ms ?? null;
-        if (
-          Number.isNaN(rowTime) ||
-          durationMs == null ||
-          now - rowTime > SUCCESS_SESSION_DEDUP_WINDOW_MS
-        ) {
-          return false;
-        }
-        // agent_messages.input_tokens already stores the chat-shape prompt_tokens
-        // (total input including cache reads + creation). Comparing the column
-        // directly avoids double-counting the cache portions which are reported
-        // separately in cache_read_tokens / cache_creation_tokens.
-        const endTimeDelta = Math.abs(now - rowTime - durationMs);
-        return (
-          (row.input_tokens ?? 0) === usage.prompt_tokens &&
-          (row.output_tokens ?? 0) === usage.completion_tokens &&
-          endTimeDelta <= SUCCESS_END_TIME_GRACE_MS
-        );
-      }) ?? null
+      (row.input_tokens ?? 0) === usage.prompt_tokens &&
+      (row.output_tokens ?? 0) === usage.completion_tokens &&
+      endTimeDelta <= SUCCESS_END_TIME_GRACE_MS
     );
   }
 
