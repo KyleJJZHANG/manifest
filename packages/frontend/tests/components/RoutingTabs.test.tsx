@@ -1,32 +1,40 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@solidjs/testing-library';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@solidjs/testing-library';
 import RoutingTabs from '../../src/components/RoutingTabs';
+
+function children() {
+  return {
+    default: <div data-testid="default-content">Default content</div>,
+    specificity: <div data-testid="specificity-content">Specificity content</div>,
+    andone: <div data-testid="andone-content">AndONE content</div>,
+    custom: <div data-testid="custom-content">Custom content</div>,
+  };
+}
 
 function renderTabs(
   overrides: Partial<{
     specificityEnabled: boolean;
+    andoneEnabled: boolean;
     customEnabled: boolean;
   }> = {},
 ) {
   return render(() => (
     <RoutingTabs
       specificityEnabled={() => overrides.specificityEnabled ?? false}
+      andoneEnabled={() => overrides.andoneEnabled ?? false}
       customEnabled={() => overrides.customEnabled ?? false}
     >
-      {{
-        default: <div data-testid="default-content">Default content</div>,
-        specificity: <div data-testid="specificity-content">Specificity content</div>,
-        custom: <div data-testid="custom-content">Custom content</div>,
-      }}
+      {children()}
     </RoutingTabs>
   ));
 }
 
 describe('RoutingTabs', () => {
-  it('renders all three tab labels', () => {
+  it('renders all four tab labels', () => {
     renderTabs();
     expect(screen.getByRole('tab', { name: /Default/ })).toBeDefined();
     expect(screen.getByRole('tab', { name: /Task-specific/ })).toBeDefined();
+    expect(screen.getByRole('tab', { name: /AndONE-Specific/ })).toBeDefined();
     expect(screen.getByRole('tab', { name: /Custom/ })).toBeDefined();
   });
 
@@ -39,6 +47,7 @@ describe('RoutingTabs', () => {
     renderTabs();
     expect(screen.getByTestId('default-content')).toBeDefined();
     expect(screen.queryByTestId('specificity-content')).toBeNull();
+    expect(screen.queryByTestId('andone-content')).toBeNull();
     expect(screen.queryByTestId('custom-content')).toBeNull();
   });
 
@@ -47,6 +56,13 @@ describe('RoutingTabs', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Task-specific/ }));
     expect(screen.queryByTestId('default-content')).toBeNull();
     expect(screen.getByTestId('specificity-content')).toBeDefined();
+  });
+
+  it('switches to AndONE-Specific tab on click', () => {
+    renderTabs();
+    fireEvent.click(screen.getByRole('tab', { name: /AndONE-Specific/ }));
+    expect(screen.queryByTestId('default-content')).toBeNull();
+    expect(screen.getByTestId('andone-content')).toBeDefined();
   });
 
   it('switches to custom tab on click', () => {
@@ -69,8 +85,12 @@ describe('RoutingTabs', () => {
     renderTabs();
     fireEvent.click(screen.getByRole('tab', { name: /Task-specific/ }));
 
-    expect(screen.getByRole('tab', { name: /Default/ }).getAttribute('aria-selected')).toBe('false');
-    expect(screen.getByRole('tab', { name: /Task-specific/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: /Default/ }).getAttribute('aria-selected')).toBe(
+      'false',
+    );
+    expect(screen.getByRole('tab', { name: /Task-specific/ }).getAttribute('aria-selected')).toBe(
+      'true',
+    );
   });
 
   it('renders tabpanel with correct role', () => {
@@ -79,23 +99,27 @@ describe('RoutingTabs', () => {
   });
 
   it('shows green dot for enabled layers and gray for disabled', () => {
-    const { container } = renderTabs({ specificityEnabled: false, customEnabled: true });
+    const { container } = renderTabs({
+      specificityEnabled: false,
+      andoneEnabled: true,
+      customEnabled: true,
+    });
     const dots = container.querySelectorAll('.routing-tabs__dot');
-    // Default (always on), specificity (off), custom (on)
+    // Default (on), specificity (off), andone (on), custom (on)
     expect(dots[0].classList.contains('routing-tabs__dot--on')).toBe(true);
     expect(dots[1].classList.contains('routing-tabs__dot--off')).toBe(true);
     expect(dots[2].classList.contains('routing-tabs__dot--on')).toBe(true);
+    expect(dots[3].classList.contains('routing-tabs__dot--on')).toBe(true);
   });
 
-  it('Default tab always has a green dot; specificity and custom are off by default', () => {
+  it('Default dot is always on; specificity, andone and custom are off by default', () => {
     const { container } = renderTabs();
     const dots = container.querySelectorAll('.routing-tabs__dot');
-    expect(dots.length).toBe(3);
-    // Default dot is always on
+    expect(dots.length).toBe(4);
     expect(dots[0].classList.contains('routing-tabs__dot--on')).toBe(true);
-    // Specificity and Custom are off by default
     expect(dots[1].classList.contains('routing-tabs__dot--off')).toBe(true);
     expect(dots[2].classList.contains('routing-tabs__dot--off')).toBe(true);
+    expect(dots[3].classList.contains('routing-tabs__dot--off')).toBe(true);
   });
 
   it('applies active class to selected tab', () => {
@@ -111,14 +135,11 @@ describe('RoutingTabs', () => {
     render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => <div data-testid="help-content">Help text</div>}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     // Help button and modal are now managed by the parent (Routing.tsx)
@@ -130,14 +151,11 @@ describe('RoutingTabs', () => {
     render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => null}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     expect(screen.queryByLabelText('How routing works')).toBeNull();
@@ -147,14 +165,11 @@ describe('RoutingTabs', () => {
     render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
         headerRight={<div data-testid="header-right-content">Right content</div>}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     expect(screen.getByTestId('header-right-content')).toBeDefined();
@@ -164,13 +179,10 @@ describe('RoutingTabs', () => {
     const { container } = render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     expect(container.querySelector('.routing-tabs__header-right')).toBeNull();
@@ -181,14 +193,11 @@ describe('RoutingTabs', () => {
     render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
         onShowHelp={onShowHelp}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     // The component accepts the prop but does not render a help button itself
@@ -199,14 +208,11 @@ describe('RoutingTabs', () => {
     render(() => (
       <RoutingTabs
         specificityEnabled={() => false}
+        andoneEnabled={() => false}
         customEnabled={() => false}
         pipelineHelp={() => <div>Help</div>}
       >
-        {{
-          default: <div>Default</div>,
-          specificity: <div>Specificity</div>,
-          custom: <div>Custom</div>,
-        }}
+        {children()}
       </RoutingTabs>
     ));
     expect(screen.queryByRole('dialog')).toBeNull();

@@ -20,6 +20,8 @@ import { agentPlatform, agentCategory } from '../services/agent-platform-store.j
 import RoutingDefaultTierSection from './RoutingDefaultTierSection.js';
 import RoutingSpecificitySection from './RoutingSpecificitySection.js';
 import RoutingHeaderTiersSection from './RoutingHeaderTiersSection.js';
+import RoutingAndOneSection from './RoutingAndOneSection.js';
+import { ANDONE_HEADER_KEY } from '../services/andone.js';
 import { RoutingLoadingSkeleton, ActiveProviderIcons, RoutingFooter } from './RoutingPanels.js';
 import { createRoutingActions } from './RoutingActions.js';
 import { listHeaderTiers, type HeaderTier } from '../services/api/header-tiers.js';
@@ -267,7 +269,10 @@ const Routing: Component = () => {
     }
   };
 
-  const hasCustomTiersEnabled = () => headerTiers()?.some((t) => t.enabled) ?? false;
+  const hasCustomTiersEnabled = () =>
+    headerTiers()?.some((t) => t.enabled && t.header_key !== ANDONE_HEADER_KEY) ?? false;
+  const hasAndoneEnabled = () =>
+    headerTiers()?.some((t) => t.enabled && t.header_key === ANDONE_HEADER_KEY) ?? false;
   const [dropdownTier, setDropdownTier] = createSignal<string | null>(null);
   const [specificityDropdown, setSpecificityDropdown] = createSignal<string | null>(null);
   const [changingSpecificity, setChangingSpecificity] = createSignal<string | null>(null);
@@ -522,6 +527,7 @@ const Routing: Component = () => {
 
           <RoutingTabs
             specificityEnabled={hasAnySpecificityActive}
+            andoneEnabled={hasAndoneEnabled}
             customEnabled={hasCustomTiersEnabled}
             pipelineHelp={() =>
               buildPipelineHelp(
@@ -613,13 +619,30 @@ const Routing: Component = () => {
                   setModelParams={setModelParamsFor}
                 />
               ),
+              andone: (
+                <RoutingAndOneSection
+                  agentName={agentName}
+                  models={() => models() ?? []}
+                  customProviders={() => customProviders() ?? []}
+                  connectedProviders={enabledConnectedProviders}
+                  tiers={() =>
+                    (headerTiers() ?? []).filter((t) => t.header_key === ANDONE_HEADER_KEY)
+                  }
+                  refetch={() => void refetchHeaderTiers()}
+                  mutate={mutateHeaderTiers}
+                  getModelParams={getModelParamsFor}
+                  setModelParams={setModelParamsFor}
+                />
+              ),
               custom: (
                 <RoutingHeaderTiersSection
                   agentName={agentName}
                   models={() => models() ?? []}
                   customProviders={() => customProviders() ?? []}
                   connectedProviders={enabledConnectedProviders}
-                  externalTiers={() => headerTiers()}
+                  externalTiers={() =>
+                    headerTiers()?.filter((t) => t.header_key !== ANDONE_HEADER_KEY)
+                  }
                   externalRefetch={() => void refetchHeaderTiers()}
                   externalMutate={mutateHeaderTiers}
                   embedded

@@ -137,6 +137,7 @@ vi.mock('../../src/components/RoutingTabs.js', () => ({
     // Read every prop incl. the pipelineHelp accessor so its line counts.
     const _read = [
       props.specificityEnabled,
+      (props.andoneEnabled as () => unknown)?.(),
       props.customEnabled,
       (props.pipelineHelp as () => unknown)?.(),
     ];
@@ -144,6 +145,7 @@ vi.mock('../../src/components/RoutingTabs.js', () => ({
     const children = props.children as {
       default: unknown;
       specificity: unknown;
+      andone: unknown;
       custom: unknown;
     };
     return (
@@ -152,6 +154,7 @@ vi.mock('../../src/components/RoutingTabs.js', () => ({
         <div data-testid="tab-header-right">{props.headerRight as unknown as Element}</div>
         <div data-testid="tab-default">{children.default as unknown as Element}</div>
         <div data-testid="tab-specificity">{children.specificity as unknown as Element}</div>
+        <div data-testid="tab-andone">{children.andone as unknown as Element}</div>
         <div data-testid="tab-custom">{children.custom as unknown as Element}</div>
       </div>
     );
@@ -543,19 +546,33 @@ vi.mock('../../src/pages/RoutingHeaderTiersSection.js', () => ({
       props.setModelParams,
     ];
     void _read;
+    void (props.externalTiers as () => unknown)?.();
     return <div data-testid="custom-section" />;
+  },
+}));
+
+vi.mock('../../src/pages/RoutingAndOneSection.js', () => ({
+  default: (props: Record<string, unknown>) => {
+    const _read = [
+      props.agentName,
+      props.models,
+      props.customProviders,
+      props.connectedProviders,
+      props.refetch,
+      props.mutate,
+      props.getModelParams,
+      props.setModelParams,
+    ];
+    void _read;
+    void (props.tiers as () => unknown)();
+    return <div data-testid="andone-section" />;
   },
 }));
 
 vi.mock('../../src/components/ResponseModeModal.js', () => ({
   default: (props: Record<string, unknown>) => {
     // Read every prop so JSX attribute lines 711-723 are covered.
-    const _read = [
-      props.responseMode,
-      props.disabled,
-      props.tiers,
-      props.models,
-    ];
+    const _read = [props.responseMode, props.disabled, props.tiers, props.models];
     void _read;
     return (
       <div data-testid="response-mode-modal">
@@ -688,6 +705,16 @@ describe('Routing page', () => {
     expect(container.querySelector('h1')).toBeNull();
   });
 
+  it('splits header tiers across the AndONE-Specific and Custom sections', async () => {
+    mockListHeaderTiers.mockResolvedValue([
+      { id: 'a', header_key: 'x-hycore-mode', header_value: 'chat', enabled: true },
+      { id: 'b', header_key: 'x-tier', header_value: 'gold', enabled: true },
+    ]);
+    render(() => <Routing />);
+    await waitFor(() => expect(screen.getByTestId('andone-section')).toBeDefined());
+    expect(screen.getByTestId('custom-section')).toBeDefined();
+  });
+
   it('renders the empty providers state when no providers are connected', async () => {
     mockGetProviders.mockResolvedValue([]);
     render(() => <Routing />);
@@ -724,7 +751,9 @@ describe('Routing page', () => {
       expect(screen.getByTestId('default-section')).toBeDefined();
     });
 
-    const pickerProviders = (lastModalsProps!.connectedProviders as () => (typeof baseProvider)[])();
+    const pickerProviders = (
+      lastModalsProps!.connectedProviders as () => (typeof baseProvider)[]
+    )();
     expect(pickerProviders.map((provider) => provider.id)).toEqual(['p1']);
   });
 
@@ -1585,9 +1614,9 @@ describe('Routing page', () => {
     // actions.getTier was consulted first with the category id.
     expect(mockActionGetTier).toHaveBeenCalledWith('coding');
     // Outer getTier maps the specificity row's category to tier and returns it.
-    const result = (lastModalsProps?.getTier as (id: string) => Record<string, unknown> | undefined)(
-      'coding',
-    );
+    const result = (
+      lastModalsProps?.getTier as (id: string) => Record<string, unknown> | undefined
+    )('coding');
     expect(result).toBeDefined();
     expect(result?.tier).toBe('coding');
     expect(result?.category).toBe('coding');
@@ -1861,7 +1890,7 @@ describe('Routing page', () => {
       fireEvent.click(screen.getByTestId('setup-done'));
       await waitFor(() => {
         expect(localStorage.getItem('setup_completed_demo')).toBe('1');
-        expect((lastSetupModalProps?.open as boolean)).toBe(false);
+        expect(lastSetupModalProps?.open as boolean).toBe(false);
       });
       expect(mockClearSetupPending).toHaveBeenCalledWith('demo');
       expect(screen.getByTestId('setup-modal').getAttribute('data-open')).toBe('false');

@@ -1,6 +1,6 @@
 import { createSignal, Show, type Component, type JSX } from 'solid-js';
 
-export type RoutingTabId = 'default' | 'specificity' | 'custom';
+export type RoutingTabId = 'default' | 'specificity' | 'andone' | 'custom';
 
 interface Tab {
   id: RoutingTabId;
@@ -10,6 +10,7 @@ interface Tab {
 
 export interface RoutingTabsProps {
   specificityEnabled: () => boolean;
+  andoneEnabled: () => boolean;
   customEnabled: () => boolean;
   pipelineHelp?: () => JSX.Element | null;
   /** Slot rendered to the right of the tabs (e.g. response mode toggle). */
@@ -19,6 +20,7 @@ export interface RoutingTabsProps {
   children: {
     default: JSX.Element;
     specificity: JSX.Element;
+    andone: JSX.Element;
     custom: JSX.Element;
   };
 }
@@ -30,6 +32,7 @@ const RoutingTabs: Component<RoutingTabsProps> = (props) => {
   const tabs: Tab[] = [
     { id: 'default', label: 'Default', dot: () => true },
     { id: 'specificity', label: 'Task-specific', dot: () => props.specificityEnabled() },
+    { id: 'andone', label: 'AndONE-Specific', dot: () => props.andoneEnabled() },
     { id: 'custom', label: 'Custom', dot: () => props.customEnabled() },
   ];
 
@@ -72,6 +75,7 @@ const RoutingTabs: Component<RoutingTabsProps> = (props) => {
       >
         <Show when={activeTab() === 'default'}>{props.children.default}</Show>
         <Show when={activeTab() === 'specificity'}>{props.children.specificity}</Show>
+        <Show when={activeTab() === 'andone'}>{props.children.andone}</Show>
         <Show when={activeTab() === 'custom'}>{props.children.custom}</Show>
       </div>
     </div>
