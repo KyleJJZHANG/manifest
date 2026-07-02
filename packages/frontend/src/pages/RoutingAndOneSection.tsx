@@ -17,6 +17,7 @@ import type {
 import { ANDONE_HEADER_KEY, ANDONE_STAGES } from '../services/andone.js';
 import { toast } from '../services/toast-store.js';
 import { TIER_COLORS, type TierColor } from 'manifest-shared';
+import '../styles/routing-andone.css';
 
 export interface RoutingAndOneSectionProps {
   agentName: Accessor<string>;
@@ -142,15 +143,11 @@ const RoutingAndOneSection: Component<RoutingAndOneSectionProps> = (props) => {
 
   return (
     <div>
-      <div class="routing-section__header" style="margin-bottom: 16px;">
-        <div>
-          <span class="routing-section__subtitle">
-            Route each AndONE harness mode to its own model. The client sends{' '}
-            <code>{ANDONE_HEADER_KEY}: &lt;mode&gt;</code>; matches force-route before all other
-            routing. Add a harness to onboard a new mode in one step.
-          </span>
-        </div>
-      </div>
+      <p class="andone-prose" style="margin-bottom: 16px;">
+        Pin each AndONE mode to its own model. When the client sends{' '}
+        <code>{ANDONE_HEADER_KEY}: &lt;mode&gt;</code>, that request is force-routed to the matching
+        card — ahead of all scoring-based routing. Use "Add harness" below to onboard a new mode.
+      </p>
 
       <div class="routing-cards header-tier-list">
         <For each={ANDONE_STAGES}>
@@ -161,15 +158,10 @@ const RoutingAndOneSection: Component<RoutingAndOneSectionProps> = (props) => {
                 when={tier()}
                 keyed
                 fallback={
-                  <div
-                    class="andone-stage-row"
-                    style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1px solid rgba(0,0,0,0.08); border-radius: 10px;"
-                  >
-                    <div>
-                      <div style="font-weight: 600;">{stage.label}</div>
-                      <div class="routing-section__subtitle" style="margin: 0;">
-                        {stage.desc}
-                      </div>
+                  <div class="andone-stage-row">
+                    <div class="andone-stage-row__text">
+                      <div class="andone-stage-row__label">{stage.label}</div>
+                      <div class="andone-stage-row__desc">{stage.desc}</div>
                     </div>
                     <button
                       type="button"
@@ -191,29 +183,37 @@ const RoutingAndOneSection: Component<RoutingAndOneSectionProps> = (props) => {
         <For each={extraTiers()}>{(tier) => card(tier)}</For>
       </div>
 
-      <div class="andone-add-harness" style="display: flex; gap: 8px; margin-top: 16px;">
-        <input
-          type="text"
-          class="input"
-          placeholder="New harness mode (e.g. eval, batch)"
-          value={newHarness()}
-          onInput={(e) => setNewHarness(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              void handleCreate(newHarness(), newHarness()).then(() => setNewHarness(''));
+      <div class="andone-add-harness">
+        <div class="andone-add-harness__row">
+          <input
+            type="text"
+            class="input"
+            style="flex: 1; min-width: 0;"
+            placeholder="New harness mode (e.g. eval)"
+            value={newHarness()}
+            onInput={(e) => setNewHarness(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                void handleCreate(newHarness(), newHarness()).then(() => setNewHarness(''));
+              }
+            }}
+          />
+          <button
+            type="button"
+            class="btn btn--outline btn--sm"
+            style="white-space: nowrap;"
+            disabled={!normalizeHarness(newHarness()) || creating() !== null}
+            onClick={() =>
+              void handleCreate(newHarness(), newHarness()).then(() => setNewHarness(''))
             }
-          }}
-        />
-        <button
-          type="button"
-          class="btn btn--outline btn--sm"
-          disabled={!normalizeHarness(newHarness()) || creating() !== null}
-          onClick={() =>
-            void handleCreate(newHarness(), newHarness()).then(() => setNewHarness(''))
-          }
-        >
-          Add harness
-        </button>
+          >
+            Add harness
+          </button>
+        </div>
+        <p class="andone-prose andone-prose--help">
+          The lowercase value your client sends as <code>{ANDONE_HEADER_KEY}</code> (e.g.{' '}
+          <code>eval</code>, <code>batch</code>). Press Enter or Add harness to create its route.
+        </p>
       </div>
     </div>
   );

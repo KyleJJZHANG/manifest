@@ -1,0 +1,79 @@
+/* AndONE-Specific routing tab (x-hycore-mode harness pinning).
+   Built on the header-tier engine, so the configured model cards reuse
+   .routing-card via HeaderTierCard. These styles cover only the tab's own
+   chrome: the intro/help prose, the not-yet-configured stage rows, and the
+   add-harness row. */
+
+/* ── Intro / help prose ──────────────────────────────
+   Flowing multi-line copy with inline x-hycore-mode chips. Deliberately NOT
+   the shared .routing-section__subtitle (a single-line, flex, vertically
+   centered label row): as a flex container it turns every text run and the
+   <code> into a separate flex item, which breaks the paragraph flow and
+   splits the chip so `x-hycore-mode:` and `<mode>` land on different lines. */
+.andone-prose {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: hsl(var(--muted-foreground));
+}
+
+.andone-prose code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  background: hsl(var(--muted) / 0.6);
+  color: hsl(var(--foreground));
+  padding: 1px 5px;
+  border-radius: 4px;
+  /* Keep `x-hycore-mode: <mode>` whole so the chip never splits mid-token. */
+  white-space: nowrap;
+}
+
+.andone-prose--help {
+  margin-top: 6px;
+}
+
+/* ── Not-yet-configured stage row ────────────────────
+   Label/desc on the left, a "Set up" CTA on the right. min-width:0 lets a
+   long label (e.g. "Workflow (frozen)") wrap instead of squeezing the
+   fixed-height .btn--sm until "Set up" wraps to two lines and overflows. */
+.andone-stage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+}
+
+.andone-stage-row__text {
+  min-width: 0;
+}
+
+.andone-stage-row__label {
+  font-weight: 600;
+  color: hsl(var(--foreground));
+}
+
+.andone-stage-row__desc {
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: hsl(var(--muted-foreground));
+}
+
+.andone-stage-row .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ── Add-harness row ─────────────────────────────────── */
+.andone-add-harness {
+  margin-top: 16px;
+}
+
+.andone-add-harness__row {
+  display: flex;
+  gap: 8px;
+  max-width: 440px;
+}
